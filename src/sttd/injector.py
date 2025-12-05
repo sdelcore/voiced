@@ -43,7 +43,6 @@ def inject_with_wtype(text: str) -> bool:
         return False
 
     try:
-        # wtype types the text as if typed on keyboard
         result = subprocess.run(
             ["wtype", "--", text],
             capture_output=True,
@@ -75,25 +74,9 @@ def inject_with_clipboard(text: str) -> bool:
         return True
 
     if not is_clipboard_available():
-        logger.error("wl-clipboard is not available")
         return False
 
     try:
-        # Save current clipboard content
-        old_clipboard = None
-        try:
-            result = subprocess.run(
-                ["wl-paste", "--no-newline"],
-                capture_output=True,
-                text=True,
-                timeout=5,
-            )
-            if result.returncode == 0:
-                old_clipboard = result.stdout
-        except Exception:
-            pass
-
-        # Copy text to clipboard
         result = subprocess.run(
             ["wl-copy", "--", text],
             capture_output=True,
@@ -103,12 +86,6 @@ def inject_with_clipboard(text: str) -> bool:
         if result.returncode != 0:
             logger.error(f"wl-copy failed: {result.stderr}")
             return False
-
-        logger.info("Text copied to clipboard")
-
-        # Optionally restore old clipboard content after a delay
-        # (Not implemented here to avoid complexity)
-
         return True
     except subprocess.TimeoutExpired:
         logger.error("Clipboard operation timed out")

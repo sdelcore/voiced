@@ -74,6 +74,14 @@ class Transcriber:
             compute_type=compute_type,
         )
 
+    def _normalize_audio(self, audio: np.ndarray) -> np.ndarray:
+        """Normalize audio to float32 in [-1, 1] range."""
+        if audio.dtype != np.float32:
+            audio = audio.astype(np.float32)
+        if audio.max() > 1.0 or audio.min() < -1.0:
+            audio = audio / 32768.0
+        return audio
+
     def transcribe_file(self, audio_path: str | Path) -> str:
         """Transcribe an audio file.
 
@@ -117,14 +125,7 @@ class Transcriber:
         Returns:
             The transcribed text.
         """
-        # Ensure audio is float32 and normalized
-        if audio.dtype != np.float32:
-            audio = audio.astype(np.float32)
-
-        # Normalize if needed (assuming int16 input range)
-        if audio.max() > 1.0 or audio.min() < -1.0:
-            audio = audio / 32768.0
-
+        audio = self._normalize_audio(audio)
         logger.info(f"Transcribing audio buffer: {len(audio)} samples at {sample_rate}Hz")
 
         segments, info = self.model.transcribe(
@@ -157,13 +158,7 @@ class Transcriber:
         Yields:
             Transcribed text segments.
         """
-        # Ensure audio is float32 and normalized
-        if audio.dtype != np.float32:
-            audio = audio.astype(np.float32)
-
-        if audio.max() > 1.0 or audio.min() < -1.0:
-            audio = audio / 32768.0
-
+        audio = self._normalize_audio(audio)
         segments, _ = self.model.transcribe(
             audio,
             language=self.config.language,

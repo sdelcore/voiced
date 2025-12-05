@@ -269,7 +269,7 @@ class Daemon:
 
         logger.info("Streaming transcription thread stopped")
 
-    def _transcribe_and_inject(self, audio_data) -> None:
+    def _transcribe_and_inject(self, audio_data: np.ndarray) -> None:
         """Transcribe audio and inject text (batch mode)."""
         try:
             if self._transcriber is None:

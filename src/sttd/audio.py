@@ -7,7 +7,6 @@ import sounddevice as sd
 
 logger = logging.getLogger(__name__)
 
-# Default sample rate for audio playback
 SAMPLE_RATE = 44100
 
 
@@ -56,67 +55,48 @@ def play_tone(
         amplitude: Volume (0.0 to 1.0).
         blocking: If True, wait for playback to complete.
     """
-    try:
-        tone = generate_tone(frequency, duration, amplitude=amplitude)
-        sd.play(tone, SAMPLE_RATE)
-        if blocking:
-            sd.wait()
-    except Exception as e:
-        logger.warning(f"Failed to play tone: {e}")
+    tone = generate_tone(frequency, duration, amplitude=amplitude)
+    sd.play(tone, SAMPLE_RATE)
+    if blocking:
+        sd.wait()
 
 
 def beep_start() -> None:
     """Play the 'recording started' beep (ascending tone)."""
-    try:
-        # Two quick ascending tones
-        tone1 = generate_tone(800, 0.08, amplitude=0.25)
-        tone2 = generate_tone(1200, 0.08, amplitude=0.25)
-        silence = np.zeros(int(SAMPLE_RATE * 0.02), dtype=np.float32)
+    tone1 = generate_tone(800, 0.08, amplitude=0.25)
+    tone2 = generate_tone(1200, 0.08, amplitude=0.25)
+    silence = np.zeros(int(SAMPLE_RATE * 0.02), dtype=np.float32)
 
-        audio = np.concatenate([tone1, silence, tone2])
-        sd.play(audio, SAMPLE_RATE)
-        sd.wait()
-    except Exception as e:
-        logger.warning(f"Failed to play start beep: {e}")
+    audio = np.concatenate([tone1, silence, tone2])
+    sd.play(audio, SAMPLE_RATE)
+    sd.wait()
 
 
 def beep_stop() -> None:
     """Play the 'recording stopped' beep (descending tone)."""
-    try:
-        # Two quick descending tones
-        tone1 = generate_tone(1200, 0.08, amplitude=0.25)
-        tone2 = generate_tone(800, 0.08, amplitude=0.25)
-        silence = np.zeros(int(SAMPLE_RATE * 0.02), dtype=np.float32)
+    tone1 = generate_tone(1200, 0.08, amplitude=0.25)
+    tone2 = generate_tone(800, 0.08, amplitude=0.25)
+    silence = np.zeros(int(SAMPLE_RATE * 0.02), dtype=np.float32)
 
-        audio = np.concatenate([tone1, silence, tone2])
-        sd.play(audio, SAMPLE_RATE)
-        sd.wait()
-    except Exception as e:
-        logger.warning(f"Failed to play stop beep: {e}")
+    audio = np.concatenate([tone1, silence, tone2])
+    sd.play(audio, SAMPLE_RATE)
+    sd.wait()
 
 
 def beep_error() -> None:
     """Play an error beep (low buzz)."""
-    try:
-        # Low frequency buzz
-        tone = generate_tone(200, 0.3, amplitude=0.3)
-        sd.play(tone, SAMPLE_RATE)
-        sd.wait()
-    except Exception as e:
-        logger.warning(f"Failed to play error beep: {e}")
+    tone = generate_tone(200, 0.3, amplitude=0.3)
+    sd.play(tone, SAMPLE_RATE)
+    sd.wait()
 
 
 def beep_success() -> None:
     """Play a success beep (pleasant chime)."""
-    try:
-        # Pleasant ascending chime
-        tone1 = generate_tone(523, 0.1, amplitude=0.2)  # C5
-        tone2 = generate_tone(659, 0.1, amplitude=0.2)  # E5
-        tone3 = generate_tone(784, 0.15, amplitude=0.2)  # G5
-        silence = np.zeros(int(SAMPLE_RATE * 0.03), dtype=np.float32)
+    tone1 = generate_tone(523, 0.1, amplitude=0.2)  # C5
+    tone2 = generate_tone(659, 0.1, amplitude=0.2)  # E5
+    tone3 = generate_tone(784, 0.15, amplitude=0.2)  # G5
+    silence = np.zeros(int(SAMPLE_RATE * 0.03), dtype=np.float32)
 
-        audio = np.concatenate([tone1, silence, tone2, silence, tone3])
-        sd.play(audio, SAMPLE_RATE)
-        sd.wait()
-    except Exception as e:
-        logger.warning(f"Failed to play success beep: {e}")
+    audio = np.concatenate([tone1, silence, tone2, silence, tone3])
+    sd.play(audio, SAMPLE_RATE)
+    sd.wait()

@@ -79,7 +79,6 @@ def create_icon_pixmap(state: TrayState) -> list:
         fill=inner_color,
     )
 
-    # Add recording dot indicator
     if state == TrayState.RECORDING:
         dot_size = 6
         draw.ellipse(
@@ -373,10 +372,7 @@ class TrayIcon:
         finally:
             self._running = False
             if self._bus:
-                try:
-                    self._bus.disconnect()
-                except Exception:
-                    pass
+                self._bus.disconnect()
 
     def start(self) -> None:
         """Start the tray icon in a background thread."""

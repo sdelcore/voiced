@@ -1,6 +1,7 @@
 """Command-line interface for sttd."""
 
 import logging
+import re
 import sys
 from pathlib import Path
 
@@ -216,7 +217,6 @@ def config(show: bool, init: bool, model: str | None, device: str | None) -> Non
             content = f.read()
 
         if model:
-            import re
             content = re.sub(
                 r'^model\s*=\s*"[^"]*"',
                 f'model = "{model}"',
@@ -226,7 +226,6 @@ def config(show: bool, init: bool, model: str | None, device: str | None) -> Non
             click.echo(f"Set model: {model}")
 
         if device:
-            import re
             content = re.sub(
                 r'^device\s*=\s*"[^"]*"',
                 f'device = "{device}"',

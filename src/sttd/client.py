@@ -9,11 +9,8 @@ from sttd.config import get_socket_path
 
 logger = logging.getLogger(__name__)
 
-# Connection timeout in seconds
 CONNECT_TIMEOUT = 5.0
-# Receive timeout in seconds
 RECV_TIMEOUT = 30.0
-# Maximum response size
 MAX_RESPONSE_SIZE = 65536
 
 
@@ -78,8 +75,6 @@ def send_command(
 
         return json.loads(data.decode("utf-8"))
 
-    except DaemonNotRunning:
-        raise
     except json.JSONDecodeError as e:
         raise ClientError(f"Invalid response from daemon: {e}")
     except socket.timeout:

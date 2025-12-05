@@ -142,21 +142,14 @@ class Server:
             self._server_thread = None
 
         if self._socket is not None:
-            try:
-                self._selector.unregister(self._socket)
-            except Exception:
-                pass
+            self._selector.unregister(self._socket)
             self._socket.close()
             self._socket = None
 
         self._selector.close()
 
-        # Remove socket file
         if self.socket_path.exists():
-            try:
-                self.socket_path.unlink()
-            except Exception:
-                pass
+            self.socket_path.unlink()
 
         logger.info("Server stopped")
 
