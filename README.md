@@ -12,6 +12,7 @@ A speech-to-text daemon for Linux/Wayland, optimized for Hyprland. Bind a hotkey
 - **Audio feedback** - Beeps for start, stop, success, and error states
 - **Smart text injection** - Uses `wtype` for native Wayland input, with clipboard fallback
 - **File transcription** - Transcribe audio files from the command line
+- **Speaker identification** - Register voice profiles and identify speakers in transcriptions
 
 ## Installation
 
@@ -82,6 +83,31 @@ sttd transcribe audio.mp3 -o transcript.txt  # Output to file
 sttd transcribe audio.wav --model large-v3   # Use a specific model
 ```
 
+### Speaker Identification
+
+Register voice profiles to identify speakers in transcriptions:
+
+```bash
+# Register a speaker from an audio file
+sttd register alice -f alice_sample.wav
+
+# Or record directly from microphone
+sttd register bob --record --duration 15
+
+# List registered profiles
+sttd profiles
+
+# Transcribe with speaker labels
+sttd transcribe meeting.wav --annotate
+```
+
+Output with `--annotate`:
+```
+[0.00-2.50] alice: Hello, how are you today?
+[2.50-5.00] bob: I'm doing great, thanks for asking.
+[5.00-8.20] alice: That's wonderful to hear.
+```
+
 ### Configuration
 
 Create a config file:
@@ -108,6 +134,11 @@ beep_enabled = true
 
 [output]
 method = "wtype"         # wtype, clipboard, both
+
+[diarization]
+device = "auto"          # auto, cuda, cpu
+similarity_threshold = 0.5  # Speaker matching threshold (0-1)
+min_segment_duration = 0.5  # Min segment length for identification
 ```
 
 ### List Audio Devices
@@ -136,6 +167,9 @@ CLI (sttd toggle) → Unix Socket → Daemon
                                     ├── Transcriber (faster-whisper)
                                     ├── Injector (wtype/wl-clipboard)
                                     └── Tray Icon (D-Bus SNI)
+
+CLI (sttd transcribe --annotate) → Transcriber → SpeakerIdentifier
+                                                   └── SpeechBrain ECAPA-TDNN
 ```
 
 ## License
