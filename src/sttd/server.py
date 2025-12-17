@@ -6,8 +6,8 @@ import os
 import selectors
 import socket
 import threading
+from collections.abc import Callable
 from pathlib import Path
-from typing import Callable
 
 from sttd.config import get_socket_path
 
@@ -72,7 +72,7 @@ class Server:
 
             conn.sendall(json.dumps(response).encode("utf-8"))
 
-        except Exception as e:
+        except Exception:
             logger.exception("Error handling client")
         finally:
             conn.close()
@@ -96,7 +96,7 @@ class Server:
                         # This is a client connection
                         key.data(key.fileobj)
                         self._selector.unregister(key.fileobj)
-            except Exception as e:
+            except Exception:
                 if self._running:
                     logger.exception("Server loop error")
 

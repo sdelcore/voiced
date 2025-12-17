@@ -77,7 +77,7 @@ def send_command(
 
     except json.JSONDecodeError as e:
         raise ClientError(f"Invalid response from daemon: {e}")
-    except socket.timeout:
+    except TimeoutError:
         raise ClientError("Timeout waiting for daemon response")
     except Exception as e:
         raise ClientError(f"Communication error: {e}")

@@ -3,7 +3,7 @@
 import logging
 import queue
 import threading
-from typing import Callable
+from collections.abc import Callable
 
 import numpy as np
 import sounddevice as sd
@@ -93,8 +93,7 @@ class Recorder:
         self._recording_thread.start()
 
         logger.info(
-            f"Recording started: {self.config.sample_rate}Hz, "
-            f"{self.config.channels} channel(s)"
+            f"Recording started: {self.config.sample_rate}Hz, {self.config.channels} channel(s)"
         )
 
     def _collect_audio(self) -> None:

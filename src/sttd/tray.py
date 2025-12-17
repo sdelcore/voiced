@@ -8,16 +8,14 @@ import logging
 import os
 import struct
 import threading
+from collections.abc import Callable
 from enum import Enum
-from typing import Callable
 
 from dasbus.connection import SessionMessageBus
-from dasbus.identifier import DBusServiceIdentifier
 from dasbus.loop import EventLoop
 from dasbus.server.interface import dbus_interface, dbus_signal
-from dasbus.server.property import emits_properties_changed
 from dasbus.server.template import InterfaceTemplate
-from dasbus.typing import Str, Int, Bool, Variant, ObjPath, List, Tuple, Byte, Structure
+from dasbus.typing import Bool, Byte, Int, List, ObjPath, Str, Tuple
 from PIL import Image, ImageDraw
 
 logger = logging.getLogger(__name__)
@@ -75,7 +73,10 @@ def create_icon_pixmap(state: TrayState) -> list:
     inner_padding = 6
     inner_color = (255, 255, 255, 200)
     draw.ellipse(
-        [(inner_padding, inner_padding + 2), (ICON_SIZE - inner_padding, ICON_SIZE - inner_padding - 2)],
+        [
+            (inner_padding, inner_padding + 2),
+            (ICON_SIZE - inner_padding, ICON_SIZE - inner_padding - 2),
+        ],
         fill=inner_color,
     )
 
@@ -361,7 +362,9 @@ class TrayIcon:
                 logger.info(f"Registered with StatusNotifierWatcher: {bus_name}")
             except Exception as e:
                 logger.warning(f"Could not register with StatusNotifierWatcher: {e}")
-                logger.warning("Tray icon may not appear - ensure a SNI host is running (e.g., waybar)")
+                logger.warning(
+                    "Tray icon may not appear - ensure a SNI host is running (e.g., waybar)"
+                )
 
             # Run the event loop
             self._loop = EventLoop()

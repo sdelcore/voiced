@@ -1,8 +1,8 @@
 """Transcription engine using faster-whisper."""
 
 import logging
+from collections.abc import Generator
 from pathlib import Path
-from typing import Generator
 
 import numpy as np
 from faster_whisper import WhisperModel
@@ -37,6 +37,7 @@ class Transcriber:
             return self.config.device
 
         import ctranslate2
+
         if ctranslate2.get_cuda_device_count() > 0:
             logger.info("CUDA available, using GPU")
             return "cuda"
@@ -109,6 +110,40 @@ class Transcriber:
             text_parts.append(segment.text.strip())
 
         return " ".join(text_parts)
+
+    def transcribe_file_with_segments(
+        self, audio_path: str | Path
+    ) -> list[tuple[float, float, str]]:
+        """Transcribe an audio file and return segments with timestamps.
+
+        Args:
+            audio_path: Path to the audio file.
+
+        Returns:
+            List of (start, end, text) tuples.
+        """
+        audio_path = Path(audio_path)
+        if not audio_path.exists():
+            raise FileNotFoundError(f"Audio file not found: {audio_path}")
+
+        logger.info(f"Transcribing file with segments: {audio_path}")
+
+        segments, info = self.model.transcribe(
+            str(audio_path),
+            language=self.config.language,
+            beam_size=5,
+            vad_filter=True,
+        )
+
+        logger.info(
+            f"Detected language: {info.language} (probability: {info.language_probability:.2f})"
+        )
+
+        result = []
+        for segment in segments:
+            result.append((segment.start, segment.end, segment.text.strip()))
+
+        return result
 
     def transcribe_audio(
         self,

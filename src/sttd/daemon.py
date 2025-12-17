@@ -7,7 +7,6 @@ import signal
 import sys
 import threading
 from enum import Enum
-from pathlib import Path
 
 import numpy as np
 
@@ -254,7 +253,9 @@ class Daemon:
                     new_text = new_text.strip()
 
                 if new_text and new_text != self._previous_text:
-                    logger.info(f"Streaming ({len(self._accumulated_audio)} chunks): {new_text[:50]}...")
+                    logger.info(
+                        f"Streaming ({len(self._accumulated_audio)} chunks): {new_text[:50]}..."
+                    )
 
                     if self._previous_text_len > 0:
                         inject_backspaces(self._previous_text_len)
@@ -295,7 +296,7 @@ class Daemon:
                 if self.config.audio.beep_enabled:
                     audio.beep_error()
 
-        except Exception as e:
+        except Exception:
             logger.exception("Transcription error")
             if self.config.audio.beep_enabled:
                 audio.beep_error()
@@ -369,7 +370,7 @@ class Daemon:
             while not self._shutdown_event.is_set():
                 self._shutdown_event.wait(timeout=1.0)
 
-        except Exception as e:
+        except Exception:
             logger.exception("Daemon error")
             raise
         finally:

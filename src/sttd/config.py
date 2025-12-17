@@ -41,12 +41,23 @@ class OutputConfig:
 
 
 @dataclass
+class DiarizationConfig:
+    """Speaker identification settings."""
+
+    device: str = "auto"  # auto, cuda, cpu
+    similarity_threshold: float = 0.5  # Speaker matching threshold
+    min_segment_duration: float = 0.5  # Minimum segment length for embedding (seconds)
+    model: str = "speechbrain/spkrec-ecapa-voxceleb"  # SpeechBrain embedding model
+
+
+@dataclass
 class Config:
     """Main configuration container."""
 
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
+    diarization: DiarizationConfig = field(default_factory=DiarizationConfig)
 
 
 def get_config_path() -> Path:
@@ -71,6 +82,14 @@ def get_socket_path() -> Path:
 def get_pid_path() -> Path:
     """Get the path to the PID file."""
     return get_cache_dir() / "daemon.pid"
+
+
+def get_profiles_dir() -> Path:
+    """Get the directory for voice profiles."""
+    config_dir = get_config_path().parent
+    profiles_dir = config_dir / "profiles"
+    profiles_dir.mkdir(parents=True, exist_ok=True)
+    return profiles_dir
 
 
 def load_config() -> Config:
@@ -100,6 +119,11 @@ def load_config() -> Config:
             if hasattr(config.output, key):
                 setattr(config.output, key, value)
 
+    if "diarization" in data:
+        for key, value in data["diarization"].items():
+            if hasattr(config.diarization, key):
+                setattr(config.diarization, key, value)
+
     return config
 
 
@@ -126,6 +150,12 @@ beep_enabled = true      # audio feedback on start/stop
 
 [output]
 method = "wtype"         # wtype, clipboard, both
+
+[diarization]
+device = "auto"          # auto, cuda, cpu
+similarity_threshold = 0.5  # Speaker matching threshold (0-1)
+min_segment_duration = 0.5  # Minimum segment length for embedding (seconds)
+# model = "speechbrain/spkrec-ecapa-voxceleb"  # SpeechBrain embedding model
 """
     with open(config_path, "w") as f:
         f.write(default_config)
