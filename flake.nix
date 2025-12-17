@@ -42,6 +42,7 @@
           makeWrapperArgs = [
             "--prefix" "LD_LIBRARY_PATH" ":" "${pkgs.portaudio}/lib"
             "--prefix" "PATH" ":" "${pkgs.lib.makeBinPath [ pkgs.wtype pkgs.wl-clipboard ]}"
+            "--prefix" "GI_TYPELIB_PATH" ":" "${pkgs.glib}/lib/girepository-1.0:${pkgs.gobject-introspection}/lib/girepository-1.0"
           ];
 
           # Skip tests during build
