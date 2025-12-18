@@ -1,7 +1,6 @@
 """Tests for local_agreement module."""
 
 import numpy as np
-import pytest
 
 from sttd.local_agreement import (
     LocalAgreementState,
@@ -10,6 +9,7 @@ from sttd.local_agreement import (
     WordInfo,
     find_agreed_prefix,
     find_sentence_boundary,
+    find_trim_point,
     trim_audio_buffer,
 )
 
@@ -353,3 +353,82 @@ class TestTrimAudioBuffer:
             sample_rate=16000,
             chunk_duration=1.0,
         )
+
+
+class TestFindTrimPoint:
+    """Tests for find_trim_point function."""
+
+    def test_finds_trim_point_after_threshold(self):
+        """Test finding trim point when confirmed audio exceeds threshold."""
+        words = [
+            WordInfo(" Hello", 0.0, 0.5, 0.9),
+            WordInfo(" this", 0.5, 1.0, 0.9),
+            WordInfo(" is", 1.0, 1.5, 0.9),
+            WordInfo(" a", 1.5, 2.0, 0.9),
+            WordInfo(" test", 2.0, 2.5, 0.9),
+            WordInfo(" of", 2.5, 3.0, 0.9),
+            WordInfo(" trimming", 3.0, 4.0, 0.9),
+            WordInfo(" audio", 4.0, 5.0, 0.9),
+            WordInfo(" buffers", 5.0, 6.0, 0.9),
+        ]
+
+        # 6 seconds of confirmed audio, threshold is 5s, overlap is 3s
+        # Should trim at ~3s mark (6 - 3 = 3), keeping words after that
+        trim_info = find_trim_point(words, min_confirmed_seconds=5.0, keep_overlap_seconds=3.0)
+
+        assert trim_info is not None
+        assert trim_info.should_trim is True
+        # Should trim at word ending at or before 3.0s
+        assert trim_info.audio_timestamp <= 3.0
+        assert len(trim_info.context_words) > 0
+
+    def test_no_trim_below_threshold(self):
+        """Test no trim when confirmed audio is below threshold."""
+        words = [
+            WordInfo(" Hello", 0.0, 0.5, 0.9),
+            WordInfo(" world", 0.5, 1.0, 0.9),
+            WordInfo(" test", 1.0, 1.5, 0.9),
+        ]
+
+        # Only 1.5 seconds of audio, threshold is 5s
+        trim_info = find_trim_point(words, min_confirmed_seconds=5.0, keep_overlap_seconds=3.0)
+
+        assert trim_info is None
+
+    def test_no_trim_empty_words(self):
+        """Test no trim with empty words list."""
+        trim_info = find_trim_point([], min_confirmed_seconds=5.0, keep_overlap_seconds=3.0)
+        assert trim_info is None
+
+    def test_trim_preserves_overlap(self):
+        """Test that overlap is preserved after trim."""
+        # Create words spanning 10 seconds
+        words = [WordInfo(f" word{i}", float(i), float(i + 1), 0.9) for i in range(10)]
+
+        # Threshold 5s, overlap 3s -> should trim at ~7s (10-3=7)
+        trim_info = find_trim_point(words, min_confirmed_seconds=5.0, keep_overlap_seconds=3.0)
+
+        assert trim_info is not None
+        # Remaining audio after trim should be >= 3 seconds
+        last_word_end = words[-1].end  # 10.0
+        remaining_audio = last_word_end - trim_info.audio_timestamp
+        assert remaining_audio >= 3.0
+
+    def test_context_words_collected(self):
+        """Test that context words are properly collected."""
+        words = [
+            WordInfo(" Hello", 0.0, 1.0, 0.9),
+            WordInfo(" world", 1.0, 2.0, 0.9),
+            WordInfo(" how", 2.0, 3.0, 0.9),
+            WordInfo(" are", 3.0, 4.0, 0.9),
+            WordInfo(" you", 4.0, 5.0, 0.9),
+            WordInfo(" today", 5.0, 6.0, 0.9),
+        ]
+
+        # 6 seconds total, threshold 5s, overlap 3s
+        trim_info = find_trim_point(words, min_confirmed_seconds=5.0, keep_overlap_seconds=3.0)
+
+        assert trim_info is not None
+        # Context should include trimmed words
+        assert len(trim_info.context_words) > 0
+        assert "Hello" in trim_info.context_words

@@ -108,10 +108,72 @@ def find_agreed_prefix(prev: TranscriptResult, curr: TranscriptResult) -> list[W
     return curr.words[:agreed_count]
 
 
+def find_trim_point(
+    confirmed_words: list[WordInfo],
+    min_confirmed_seconds: float = 5.0,
+    keep_overlap_seconds: float = 3.0,
+) -> TrimInfo | None:
+    """Find trim point based on confirmed audio duration.
+
+    This function determines when to trim the audio buffer based on how much
+    audio has been confirmed by LocalAgreement. Unlike sentence-boundary
+    trimming, this works even when speech lacks punctuation.
+
+    Strategy:
+    1. Check if confirmed audio duration exceeds threshold
+    2. Find trim point that keeps overlap seconds of context
+    3. Return trim info with timestamp and context words
+
+    Args:
+        confirmed_words: List of confirmed words with timestamps.
+        min_confirmed_seconds: Minimum confirmed audio duration before trimming.
+        keep_overlap_seconds: How much confirmed audio to keep for context.
+
+    Returns:
+        TrimInfo if trim point found, None otherwise.
+    """
+    if not confirmed_words:
+        return None
+
+    last_word = confirmed_words[-1]
+    confirmed_duration = last_word.end
+
+    # Only trim if we have enough confirmed audio
+    if confirmed_duration < min_confirmed_seconds:
+        return None
+
+    # Find trim point: keep last N seconds of confirmed audio
+    target_trim_time = confirmed_duration - keep_overlap_seconds
+
+    # Find word at or before target trim time
+    trim_index = 0
+    for i, word in enumerate(confirmed_words):
+        if word.end <= target_trim_time:
+            trim_index = i
+        else:
+            break
+
+    if trim_index == 0:
+        return None
+
+    trim_word = confirmed_words[trim_index]
+    context_words = [w.word.strip() for w in confirmed_words[: trim_index + 1]]
+
+    return TrimInfo(
+        should_trim=True,
+        word_index=trim_index,
+        audio_timestamp=trim_word.end,
+        context_words=context_words,
+    )
+
+
 def find_sentence_boundary(
     words: list[WordInfo], min_words_after: int = 3, min_words_before: int = 5
 ) -> TrimInfo | None:
     """Find the last sentence boundary in confirmed words for buffer trimming.
+
+    NOTE: This function is kept for backwards compatibility but find_trim_point()
+    is preferred as it works even without punctuation in speech.
 
     Strategy:
     1. Look for sentence-ending punctuation (. ! ?)

@@ -23,6 +23,8 @@ class TranscriptionConfig:
     max_window: float = 30.0  # Max seconds of audio in sliding window
     beam_size: int = 1  # Beam size for streaming (1 = greedy decoding for speed)
     context_words: int = 200  # Words to keep as initial_prompt context after buffer trim
+    min_confirmed_trim: float = 5.0  # Min confirmed audio seconds before trimming buffer
+    trim_overlap: float = 3.0  # Seconds of confirmed audio to keep as overlap after trim
 
 
 @dataclass

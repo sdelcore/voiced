@@ -18,7 +18,7 @@ from sttd.local_agreement import (
     TranscriptResult,
     WordInfo,
     find_agreed_prefix,
-    find_sentence_boundary,
+    find_trim_point,
     trim_audio_buffer,
 )
 from sttd.recorder import Recorder
@@ -290,8 +290,12 @@ class Daemon:
                         state.confirmed_word_count = len(agreed)
                         state.confirmed_text += new_text
 
-                        # Check for sentence boundary to trim buffer
-                        trim_info = find_sentence_boundary(agreed)
+                        # Check for trim point based on confirmed audio duration
+                        trim_info = find_trim_point(
+                            agreed,
+                            min_confirmed_seconds=self.config.transcription.min_confirmed_trim,
+                            keep_overlap_seconds=self.config.transcription.trim_overlap,
+                        )
                         if trim_info is not None:
                             logger.debug(f"Trimming buffer at {trim_info.audio_timestamp:.2f}s")
                             trim_audio_buffer(
