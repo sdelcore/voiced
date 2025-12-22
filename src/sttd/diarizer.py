@@ -6,7 +6,13 @@ from pathlib import Path
 
 import numpy as np
 import torch
+
+# Compatibility shim: newer torchaudio removed list_audio_backends() but SpeechBrain still calls it
+import torchaudio
 from scipy.spatial.distance import cosine
+
+if not hasattr(torchaudio, "list_audio_backends"):
+    torchaudio.list_audio_backends = lambda: ["soundfile"]
 
 from sttd.config import DiarizationConfig
 from sttd.profiles import ProfileManager, VoiceProfile
@@ -69,18 +75,22 @@ class SpeakerEmbedder:
 
     def extract_embedding(self, audio_path: str | Path) -> np.ndarray:
         """Extract speaker embedding from an audio file."""
-        import torchaudio
+        import soundfile as sf
+        from scipy.signal import resample
 
-        signal, fs = torchaudio.load(str(audio_path))
-
-        # Resample to 16kHz if needed
-        if fs != 16000:
-            resampler = torchaudio.transforms.Resample(fs, 16000)
-            signal = resampler(signal)
+        audio, sr = sf.read(str(audio_path))
 
         # Convert stereo to mono if needed
-        if signal.shape[0] > 1:
-            signal = signal.mean(dim=0, keepdim=True)
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1)
+
+        # Resample to 16kHz if needed
+        if sr != 16000:
+            num_samples = int(len(audio) * 16000 / sr)
+            audio = resample(audio, num_samples)
+
+        # Convert to torch tensor with shape (1, samples)
+        signal = torch.from_numpy(audio).float().unsqueeze(0)
 
         embedding = self.classifier.encode_batch(signal)
         return embedding.squeeze().cpu().numpy()
@@ -91,17 +101,19 @@ class SpeakerEmbedder:
         sample_rate: int = 16000,
     ) -> np.ndarray:
         """Extract embedding from numpy audio array."""
-        import torchaudio
+        from scipy.signal import resample
 
-        # Convert to tensor
-        signal = torch.from_numpy(audio).float()
-        if signal.dim() == 1:
-            signal = signal.unsqueeze(0)  # Add channel dimension
+        # Ensure 1D array
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1)
 
         # Resample if needed
         if sample_rate != 16000:
-            resampler = torchaudio.transforms.Resample(sample_rate, 16000)
-            signal = resampler(signal)
+            num_samples = int(len(audio) * 16000 / sample_rate)
+            audio = resample(audio, num_samples)
+
+        # Convert to torch tensor with shape (1, samples)
+        signal = torch.from_numpy(audio).float().unsqueeze(0)
 
         embedding = self.classifier.encode_batch(signal)
         return embedding.squeeze().cpu().numpy()

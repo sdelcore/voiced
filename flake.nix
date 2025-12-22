@@ -35,7 +35,8 @@
             scipy
             soundfile
             speechbrain
-            torchaudio
+            huggingface-hub
+            requests
           ];
 
           # Runtime dependencies
