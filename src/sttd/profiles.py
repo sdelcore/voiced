@@ -30,8 +30,15 @@ class VoiceProfile:
 class ProfileManager:
     """Manages voice profiles for speaker diarization."""
 
-    def __init__(self, profiles_dir: Path | None = None):
-        self.profiles_dir = profiles_dir or get_profiles_dir()
+    def __init__(self, profiles_dir: Path | str | None = None):
+        if profiles_dir is None:
+            self.profiles_dir = get_profiles_dir()
+        elif isinstance(profiles_dir, str):
+            self.profiles_dir = Path(profiles_dir)
+        else:
+            self.profiles_dir = profiles_dir
+        # Ensure directory exists
+        self.profiles_dir.mkdir(parents=True, exist_ok=True)
 
     def _profile_path(self, name: str) -> Path:
         """Get path for a profile file."""
@@ -40,11 +47,15 @@ class ProfileManager:
 
     def save(self, profile: VoiceProfile) -> Path:
         """Save a voice profile to disk."""
-        path = self._profile_path(profile.name)
-        with open(path, "w") as f:
-            json.dump(asdict(profile), f, indent=2)
-        logger.info(f"Saved profile: {profile.name} -> {path}")
-        return path
+        try:
+            path = self._profile_path(profile.name)
+            with open(path, "w") as f:
+                json.dump(asdict(profile), f, indent=2)
+            logger.info(f"Saved profile: {profile.name} -> {path}")
+            return path
+        except Exception as e:
+            logger.error(f"Failed to save profile '{profile.name}': {e}")
+            raise
 
     def load(self, name: str) -> VoiceProfile | None:
         """Load a voice profile by name."""
