@@ -8,11 +8,6 @@ import numpy as np
 import torch
 from scipy.spatial.distance import cosine
 
-# Compatibility fix for newer torchaudio versions that removed list_audio_backends
-import torchaudio
-if not hasattr(torchaudio, 'list_audio_backends'):
-    torchaudio.list_audio_backends = lambda: ['soundfile']
-
 from sttd.config import DiarizationConfig
 from sttd.profiles import ProfileManager, VoiceProfile
 
