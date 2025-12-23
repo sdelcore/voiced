@@ -46,12 +46,14 @@ class OutputConfig:
 
 @dataclass
 class DiarizationConfig:
-    """Speaker identification settings."""
+    """Speaker diarization settings."""
 
     device: str = "auto"  # auto, cuda, cpu
-    similarity_threshold: float = 0.5  # Speaker matching threshold
+    similarity_threshold: float = 0.5  # Profile matching threshold
     min_segment_duration: float = 0.5  # Minimum segment length for embedding (seconds)
     model: str = "speechbrain/spkrec-ecapa-voxceleb"  # SpeechBrain embedding model
+    num_speakers: int | None = None  # Number of speakers (None = auto-detect)
+    clustering_threshold: float = 0.7  # Clustering threshold when num_speakers is None
 
 
 @dataclass
@@ -159,9 +161,11 @@ method = "wtype"         # wtype, clipboard, both
 
 [diarization]
 device = "auto"          # auto, cuda, cpu
-similarity_threshold = 0.5  # Speaker matching threshold (0-1)
+similarity_threshold = 0.5  # Profile matching threshold (0-1)
 min_segment_duration = 0.5  # Minimum segment length for embedding (seconds)
 # model = "speechbrain/spkrec-ecapa-voxceleb"  # SpeechBrain embedding model
+# num_speakers = 2       # Set if known, leave unset for auto-detect
+# clustering_threshold = 0.7  # Clustering threshold when num_speakers is None
 """
     with open(config_path, "w") as f:
         f.write(default_config)

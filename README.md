@@ -4,15 +4,15 @@ A speech-to-text daemon for Linux/Wayland, optimized for Hyprland. Bind a hotkey
 
 ## Features
 
-- **Real-time streaming transcription** - See text appear as you speak
-- **Hotkey toggle** - Bind `sttd toggle` to any key (e.g., Super+R)
-- **System tray integration** - Visual state indicator (idle/recording/transcribing)
-- **GPU acceleration** - Automatic CUDA detection with CPU fallback
-- **Multiple Whisper models** - From tiny (~75MB) to large-v3 (~3GB)
-- **Audio feedback** - Beeps for start, stop, success, and error states
-- **Smart text injection** - Uses `wtype` for native Wayland input, with clipboard fallback
-- **File transcription** - Transcribe audio files from the command line
-- **Speaker identification** - Register voice profiles and identify speakers in transcriptions
+- Real-time streaming transcription
+- Hotkey toggle - bind `sttd toggle` to any key
+- System tray integration
+- GPU acceleration with CPU fallback
+- Multiple Whisper models (tiny to large-v3)
+- Audio feedback on start/stop
+- Text injection via wtype with clipboard fallback
+- File transcription
+- Speaker diarization with profile matching
 
 ## Installation
 

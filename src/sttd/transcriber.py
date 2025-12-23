@@ -145,6 +145,40 @@ class Transcriber:
 
         return result
 
+    def transcribe_audio_with_segments(
+        self,
+        audio: np.ndarray,
+        sample_rate: int = 16000,
+    ) -> list[tuple[float, float, str]]:
+        """Transcribe audio array and return segments with timestamps.
+
+        Args:
+            audio: Audio data as numpy array (float32, mono).
+            sample_rate: Sample rate of the audio (default: 16000).
+
+        Returns:
+            List of (start, end, text) tuples.
+        """
+        audio = self._normalize_audio(audio)
+        logger.info(f"Transcribing audio with segments: {len(audio)} samples at {sample_rate}Hz")
+
+        segments, info = self.model.transcribe(
+            audio,
+            language=self.config.language,
+            beam_size=5,
+            vad_filter=True,
+        )
+
+        logger.info(
+            f"Detected language: {info.language} (probability: {info.language_probability:.2f})"
+        )
+
+        result = []
+        for segment in segments:
+            result.append((segment.start, segment.end, segment.text.strip()))
+
+        return result
+
     def transcribe_audio(
         self,
         audio: np.ndarray,

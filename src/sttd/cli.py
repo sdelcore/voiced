@@ -22,6 +22,15 @@ def setup_logging(verbose: bool = False) -> None:
     )
 
 
+def format_srt_timestamp(seconds: float) -> str:
+    """Format seconds as SRT timestamp: HH:MM:SS,mmm"""
+    hours = int(seconds // 3600)
+    minutes = int((seconds % 3600) // 60)
+    secs = int(seconds % 60)
+    millis = int((seconds % 1) * 1000)
+    return f"{hours:02d}:{minutes:02d}:{secs:02d},{millis:03d}"
+
+
 @click.group()
 @click.version_option(__version__, prog_name="sttd")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose logging")
@@ -139,12 +148,14 @@ def status() -> None:
 @click.option("--model", default=None, help="Model to use (overrides config)")
 @click.option("--device", default=None, help="Device to use: auto, cuda, cpu")
 @click.option("--annotate", is_flag=True, help="Enable timestamps and speaker diarization")
+@click.option("--num-speakers", type=int, default=None, help="Number of speakers (auto if unset)")
 def transcribe(
     audio_file: Path,
     output: Path | None,
     model: str | None,
     device: str | None,
     annotate: bool,
+    num_speakers: int | None,
 ) -> None:
     """Transcribe an audio file.
 
@@ -157,6 +168,8 @@ def transcribe(
         sttd transcribe audio.wav --model large-v3 --device cuda
 
         sttd transcribe meeting.wav --annotate
+
+        sttd transcribe meeting.wav --annotate --num-speakers 3
     """
     from sttd.transcriber import Transcriber
 
@@ -175,32 +188,46 @@ def transcribe(
         transcriber = Transcriber(config.transcription)
 
         if annotate:
-            from sttd.diarizer import SpeakerIdentifier
+            from sttd.diarizer import (
+                SpeakerDiarizer,
+                align_transcription_with_diarization,
+            )
             from sttd.profiles import ProfileManager
 
-            click.echo("Running speaker identification...", err=True)
+            click.echo("Running speaker diarization...", err=True)
 
-            # Get transcription segments first
-            trans_segments = transcriber.transcribe_file_with_segments(audio_file)
-            click.echo(f"Found {len(trans_segments)} segment(s)", err=True)
-
-            # Load profiles
-            pm = ProfileManager()
-            profiles = pm.load_all()
-            if profiles:
-                click.echo(f"Loaded {len(profiles)} voice profile(s)", err=True)
-
-            # Identify speakers per segment
-            identifier = SpeakerIdentifier(
+            # Run diarization first
+            diarizer = SpeakerDiarizer(
                 config=config.diarization,
                 device=device or config.diarization.device,
             )
 
-            result_segments = identifier.identify_segments(
-                audio_file,
+            # Load profiles for matching
+            pm = ProfileManager()
+            profiles = pm.load_all()
+            if profiles:
+                click.echo(f"Loaded {len(profiles)} voice profile(s)", err=True)
+                diar_segments = diarizer.diarize_and_match_profiles(
+                    audio_file,
+                    profiles,
+                    num_speakers=num_speakers,
+                )
+            else:
+                diar_segments = diarizer.diarize_file(
+                    audio_file,
+                    num_speakers=num_speakers,
+                )
+
+            click.echo(f"Found {len(set(s.speaker for s in diar_segments))} speaker(s)", err=True)
+
+            # Get transcription segments
+            trans_segments = transcriber.transcribe_file_with_segments(audio_file)
+            click.echo(f"Found {len(trans_segments)} text segment(s)", err=True)
+
+            # Align transcription with diarization
+            result_segments = align_transcription_with_diarization(
                 trans_segments,
-                profiles,
-                threshold=config.diarization.similarity_threshold,
+                diar_segments,
             )
 
             output_lines = []
@@ -222,6 +249,175 @@ def transcribe(
     except FileNotFoundError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command()
+@click.option("-o", "--output", type=click.Path(path_type=Path), help="Output file")
+@click.option("--model", default=None, help="Model to use (overrides config)")
+@click.option("--device", default=None, help="Device to use: auto, cuda, cpu")
+@click.option("--annotate", is_flag=True, help="Enable speaker diarization")
+@click.option("--num-speakers", type=int, default=None, help="Number of speakers (auto if unset)")
+def record(
+    output: Path | None,
+    model: str | None,
+    device: str | None,
+    annotate: bool,
+    num_speakers: int | None,
+) -> None:
+    """Record from microphone and transcribe with timestamps.
+
+    Recording stops with Ctrl+C. After stopping, the audio is transcribed
+    with SRT-style timestamps.
+
+    Examples:
+
+        sttd record
+
+        sttd record -o transcript.txt
+
+        sttd record --annotate
+
+        sttd record --annotate --num-speakers 2
+
+        sttd record --model large-v3 --device cuda
+    """
+    import signal
+    import tempfile
+    import time
+
+    from sttd.recorder import Recorder
+    from sttd.transcriber import Transcriber
+
+    config = load_config()
+
+    # Override config with CLI options
+    if model:
+        config.transcription.model = model
+    if device:
+        config.transcription.device = device
+
+    click.echo("Recording... Press Ctrl+C to stop.", err=True)
+
+    recorder = Recorder(config=config.audio)
+    recording_stopped = False
+
+    def handle_sigint(signum, frame):
+        nonlocal recording_stopped
+        if not recording_stopped:
+            recording_stopped = True
+            click.echo("\nStopping recording...", err=True)
+
+    # Install signal handler
+    original_handler = signal.signal(signal.SIGINT, handle_sigint)
+
+    try:
+        recorder.start()
+
+        # Wait until Ctrl+C
+        while not recording_stopped:
+            time.sleep(0.1)
+
+        audio_data = recorder.stop()
+
+    finally:
+        # Restore original signal handler
+        signal.signal(signal.SIGINT, original_handler)
+
+    duration = len(audio_data) / config.audio.sample_rate
+    click.echo(f"Recorded {duration:.2f} seconds of audio", err=True)
+
+    if len(audio_data) < config.audio.sample_rate * 0.5:
+        click.echo("Error: Recording too short (minimum 0.5 seconds)", err=True)
+        sys.exit(1)
+
+    click.echo(f"Transcribing with model: {config.transcription.model}", err=True)
+
+    try:
+        transcriber = Transcriber(config.transcription)
+        segments = transcriber.transcribe_audio_with_segments(
+            audio_data,
+            config.audio.sample_rate,
+        )
+
+        click.echo(f"Found {len(segments)} segment(s)", err=True)
+
+        if annotate:
+            import soundfile as sf
+
+            from sttd.diarizer import (
+                SpeakerDiarizer,
+                align_transcription_with_diarization,
+            )
+            from sttd.profiles import ProfileManager
+
+            click.echo("Running speaker diarization...", err=True)
+
+            # Save audio to temp file for diarization (SpeechBrain requires file path)
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
+                temp_path = Path(f.name)
+
+            try:
+                sf.write(str(temp_path), audio_data, config.audio.sample_rate)
+
+                diarizer = SpeakerDiarizer(
+                    config=config.diarization,
+                    device=device or config.diarization.device,
+                )
+
+                pm = ProfileManager()
+                profiles = pm.load_all()
+                if profiles:
+                    click.echo(f"Loaded {len(profiles)} voice profile(s)", err=True)
+                    diar_segments = diarizer.diarize_and_match_profiles(
+                        temp_path,
+                        profiles,
+                        num_speakers=num_speakers,
+                    )
+                else:
+                    diar_segments = diarizer.diarize_file(
+                        temp_path,
+                        num_speakers=num_speakers,
+                    )
+
+                click.echo(
+                    f"Found {len(set(s.speaker for s in diar_segments))} speaker(s)", err=True
+                )
+
+                # Align transcription with diarization
+                result_segments = align_transcription_with_diarization(
+                    segments,
+                    diar_segments,
+                )
+
+                output_lines = []
+                for seg in result_segments:
+                    start_ts = format_srt_timestamp(seg.start)
+                    end_ts = format_srt_timestamp(seg.end)
+                    output_lines.append(f"[{start_ts} --> {end_ts}] {seg.speaker}: {seg.text}")
+
+                text = "\n".join(output_lines)
+            finally:
+                temp_path.unlink(missing_ok=True)
+        else:
+            # Format without speaker diarization
+            output_lines = []
+            for start, end, segment_text in segments:
+                start_ts = format_srt_timestamp(start)
+                end_ts = format_srt_timestamp(end)
+                output_lines.append(f"[{start_ts} --> {end_ts}] {segment_text}")
+
+            text = "\n".join(output_lines)
+
+        if output:
+            with open(output, "w") as f:
+                f.write(text)
+            click.echo(f"Saved to: {output}", err=True)
+        else:
+            click.echo(text)
+
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)

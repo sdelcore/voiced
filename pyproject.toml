@@ -34,6 +34,7 @@ dependencies = [
     "soundfile>=0.12.0",
     "scipy>=1.10.0",
     "requests>=2.28.0",
+    "scikit-learn>=1.0.0",
 ]
 
 [project.optional-dependencies]
