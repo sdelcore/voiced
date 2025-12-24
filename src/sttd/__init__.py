@@ -31,7 +31,6 @@ from sttd.config import (
     AudioConfig,
     Config,
     DiarizationConfig,
-    OutputConfig,
     TranscriptionConfig,
 )
 
@@ -76,5 +75,4 @@ __all__ = [
     "ProfileManager",
     # Configuration
     "Config",
-    "OutputConfig",
 ]

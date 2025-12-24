@@ -18,13 +18,6 @@ class TranscriptionConfig:
     device: str = "auto"
     compute_type: str = "auto"
     language: str = "en"
-    streaming: bool = True
-    chunk_duration: float = 1.0  # Seconds per chunk (reduced from 2.0 for faster feedback)
-    max_window: float = 30.0  # Max seconds of audio in sliding window
-    beam_size: int = 1  # Beam size for streaming (1 = greedy decoding for speed)
-    context_words: int = 200  # Words to keep as initial_prompt context after buffer trim
-    min_confirmed_trim: float = 5.0  # Min confirmed audio seconds before trimming buffer
-    trim_overlap: float = 3.0  # Seconds of confirmed audio to keep as overlap after trim
 
 
 @dataclass
@@ -35,13 +28,6 @@ class AudioConfig:
     channels: int = 1
     device: str = "default"
     beep_enabled: bool = True
-
-
-@dataclass
-class OutputConfig:
-    """Output settings."""
-
-    method: str = "wtype"  # wtype, clipboard, both
 
 
 @dataclass
@@ -62,7 +48,6 @@ class Config:
 
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
-    output: OutputConfig = field(default_factory=OutputConfig)
     diarization: DiarizationConfig = field(default_factory=DiarizationConfig)
 
 
@@ -120,11 +105,6 @@ def load_config() -> Config:
             if hasattr(config.audio, key):
                 setattr(config.audio, key, value)
 
-    if "output" in data:
-        for key, value in data["output"].items():
-            if hasattr(config.output, key):
-                setattr(config.output, key, value)
-
     if "diarization" in data:
         for key, value in data["diarization"].items():
             if hasattr(config.diarization, key):
@@ -144,20 +124,12 @@ model = "base"           # tiny, base, small, medium, large-v3
 device = "auto"          # auto, cuda, cpu
 compute_type = "auto"    # auto, float16, int8, float32
 language = "en"
-streaming = true
-chunk_duration = 1.0     # Seconds per chunk
-max_window = 30.0        # Max seconds in sliding window
-beam_size = 1            # Beam size for streaming (1 = greedy for speed)
-context_words = 200      # Words to keep as context after buffer trim
 
 [audio]
 sample_rate = 16000
 channels = 1
 device = "default"       # or specific device name
 beep_enabled = true      # audio feedback on start/stop
-
-[output]
-method = "wtype"         # wtype, clipboard, both
 
 [diarization]
 device = "auto"          # auto, cuda, cpu

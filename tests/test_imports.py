@@ -1,7 +1,6 @@
 """Tests for public API imports."""
 
 
-
 class TestPublicImports:
     """Verify all public API items are importable from sttd."""
 
@@ -53,10 +52,9 @@ class TestPublicImports:
 
     def test_import_config(self):
         """Test config classes are importable."""
-        from sttd import Config, OutputConfig
+        from sttd import Config
 
         assert Config is not None
-        assert OutputConfig is not None
 
     def test_import_all(self):
         """Test __all__ contains expected items."""
@@ -78,7 +76,6 @@ class TestPublicImports:
             "VoiceProfile",
             "ProfileManager",
             "Config",
-            "OutputConfig",
         ]
         for item in expected:
             assert item in sttd.__all__, f"{item} not in __all__"
