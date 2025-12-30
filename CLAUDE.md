@@ -41,13 +41,18 @@ CLI Command → Unix Socket IPC → Daemon
                                   ├── Server (server.py) - Unix socket handler
                                   ├── Recorder (recorder.py) - sounddevice audio capture
                                   ├── Transcriber (transcriber.py) - faster-whisper
-                                  ├── Injector (injector.py) - wtype/wl-clipboard text input
+                                  ├── Injector (injector.py) - wl-clipboard text injection
                                   └── TrayIcon (tray.py) - D-Bus StatusNotifierItem
 ```
 
 ### Key Design Patterns
 
-**Streaming Transcription**: Uses a sliding window approach. Audio chunks accumulate up to `max_window` seconds, then oldest chunks are trimmed. Text from trimmed chunks is preserved as `initial_prompt` context for the model.
+**Record-then-Transcribe**: Toggle once to start recording (RED tray icon), toggle again to stop and begin batch transcription (YELLOW icon). When complete (BLUE icon), text is copied to clipboard.
+
+**HTTP Client-Server Mode**: For remote transcription:
+- `http_server.py` - HTTP server with `/transcribe`, `/health`, `/status` endpoints
+- `http_client.py` - HTTP client for remote connections
+- `remote_daemon.py` - Client daemon (records locally, sends to server)
 
 **State Machine**: Daemon states are `IDLE → RECORDING → TRANSCRIBING → IDLE`. The tray icon reflects state visually.
 

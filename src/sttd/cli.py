@@ -260,6 +260,10 @@ def status() -> None:
 @click.option("--device", default=None, help="Device to use: auto, cuda, cpu")
 @click.option("--annotate", is_flag=True, help="Enable timestamps and speaker diarization")
 @click.option("--num-speakers", type=int, default=None, help="Number of speakers (auto if unset)")
+@click.option(
+    "--server", "server_url", default=None, help="Server URL for remote transcription"
+)
+@click.option("--timeout", type=float, default=300.0, help="Request timeout in seconds (default: 300)")
 def transcribe(
     audio_file: Path,
     output: Path | None,
@@ -267,6 +271,8 @@ def transcribe(
     device: str | None,
     annotate: bool,
     num_speakers: int | None,
+    server_url: str | None,
+    timeout: float,
 ) -> None:
     """Transcribe an audio file.
 
@@ -281,9 +287,11 @@ def transcribe(
         sttd transcribe meeting.wav --annotate
 
         sttd transcribe meeting.wav --annotate --num-speakers 3
-    """
-    from sttd.transcriber import Transcriber
 
+        sttd transcribe audio.wav --server http://192.168.1.100:8765
+
+        sttd transcribe meeting.wav --annotate --server http://server:8765
+    """
     config = load_config()
 
     # Override config with CLI options
@@ -293,62 +301,71 @@ def transcribe(
         config.transcription.device = device
 
     click.echo(f"Transcribing: {audio_file}", err=True)
-    click.echo(f"Model: {config.transcription.model}", err=True)
 
     try:
-        transcriber = Transcriber(config.transcription)
+        # Use HTTP mode if server URL is provided
+        if server_url:
+            click.echo(f"Using remote server: {server_url}", err=True)
+            _transcribe_remote(audio_file, output, server_url, timeout, annotate)
+        else:
+            click.echo(f"Model: {config.transcription.model}", err=True)
+            _transcribe_local(audio_file, output, config, device, annotate, num_speakers)
 
-        if annotate:
-            from sttd.diarizer import (
-                SpeakerDiarizer,
-                align_transcription_with_diarization,
-            )
-            from sttd.profiles import ProfileManager
+    except FileNotFoundError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
-            click.echo("Running speaker diarization...", err=True)
 
-            # Run diarization first
-            diarizer = SpeakerDiarizer(
-                config=config.diarization,
-                device=device or config.diarization.device,
-            )
+def _transcribe_remote(
+    audio_file: Path,
+    output: Path | None,
+    server_url: str,
+    timeout: float,
+    annotate: bool,
+) -> None:
+    """Transcribe using remote HTTP server."""
+    import soundfile as sf
 
-            # Load profiles for matching
-            pm = ProfileManager()
-            profiles = pm.load_all()
-            if profiles:
-                click.echo(f"Loaded {len(profiles)} voice profile(s)", err=True)
-                diar_segments = diarizer.diarize_and_match_profiles(
-                    audio_file,
-                    profiles,
-                    num_speakers=num_speakers,
-                )
-            else:
-                diar_segments = diarizer.diarize_file(
-                    audio_file,
-                    num_speakers=num_speakers,
-                )
+    from sttd.http_client import (
+        HttpConnectionError,
+        HttpTimeoutError,
+        ServerError,
+        TranscriptionClient,
+    )
 
-            click.echo(f"Found {len(set(s.speaker for s in diar_segments))} speaker(s)", err=True)
+    # Load audio file
+    audio, sample_rate = sf.read(str(audio_file), dtype="float32")
 
-            # Get transcription segments
-            trans_segments = transcriber.transcribe_file_with_segments(audio_file)
-            click.echo(f"Found {len(trans_segments)} text segment(s)", err=True)
+    # Convert stereo to mono if needed
+    if len(audio.shape) > 1:
+        audio = audio.mean(axis=1)
 
-            # Align transcription with diarization
-            result_segments = align_transcription_with_diarization(
-                trans_segments,
-                diar_segments,
-            )
+    client = TranscriptionClient(server_url, timeout=timeout)
 
+    try:
+        # Server handles diarization when identify_speakers=True
+        result = client.transcribe(
+            audio,
+            sample_rate=sample_rate,
+            identify_speakers=annotate,
+        )
+
+        if annotate and "segments" in result:
+            # Format segments with speaker info
             output_lines = []
-            for seg in result_segments:
-                time_str = f"[{seg.start:.2f}-{seg.end:.2f}]"
-                output_lines.append(f"{time_str} {seg.speaker}: {seg.text}")
-
+            for seg in result["segments"]:
+                start = seg.get("start", 0)
+                end = seg.get("end", 0)
+                speaker = seg.get("speaker", "Unknown")
+                text = seg.get("text", "").strip()
+                time_str = f"[{start:.2f}-{end:.2f}]"
+                output_lines.append(f"{time_str} {speaker}: {text}")
             text = "\n".join(output_lines)
         else:
-            text = transcriber.transcribe_file(audio_file)
+            text = result.get("text", "")
 
         if output:
             with open(output, "w") as f:
@@ -357,12 +374,88 @@ def transcribe(
         else:
             click.echo(text)
 
-    except FileNotFoundError as e:
-        click.echo(f"Error: {e}", err=True)
+    except ServerError as e:
+        click.echo(f"Server error: {e}", err=True)
         sys.exit(1)
-    except Exception as e:
-        click.echo(f"Error: {e}", err=True)
+    except HttpConnectionError as e:
+        click.echo(f"Connection error: {e}", err=True)
         sys.exit(1)
+    except HttpTimeoutError as e:
+        click.echo(f"Timeout: {e}", err=True)
+        sys.exit(1)
+
+
+def _transcribe_local(
+    audio_file: Path,
+    output: Path | None,
+    config,
+    device: str | None,
+    annotate: bool,
+    num_speakers: int | None,
+) -> None:
+    """Transcribe using local model."""
+    from sttd.transcriber import Transcriber
+
+    transcriber = Transcriber(config.transcription)
+
+    if annotate:
+        from sttd.diarizer import (
+            SpeakerDiarizer,
+            align_transcription_with_diarization,
+        )
+        from sttd.profiles import ProfileManager
+
+        click.echo("Running speaker diarization...", err=True)
+
+        # Run diarization first
+        diarizer = SpeakerDiarizer(
+            config=config.diarization,
+            device=device or config.diarization.device,
+        )
+
+        # Load profiles for matching
+        pm = ProfileManager()
+        profiles = pm.load_all()
+        if profiles:
+            click.echo(f"Loaded {len(profiles)} voice profile(s)", err=True)
+            diar_segments = diarizer.diarize_and_match_profiles(
+                audio_file,
+                profiles,
+                num_speakers=num_speakers,
+            )
+        else:
+            diar_segments = diarizer.diarize_file(
+                audio_file,
+                num_speakers=num_speakers,
+            )
+
+        click.echo(f"Found {len(set(s.speaker for s in diar_segments))} speaker(s)", err=True)
+
+        # Get transcription segments
+        trans_segments = transcriber.transcribe_file_with_segments(audio_file)
+        click.echo(f"Found {len(trans_segments)} text segment(s)", err=True)
+
+        # Align transcription with diarization
+        result_segments = align_transcription_with_diarization(
+            trans_segments,
+            diar_segments,
+        )
+
+        output_lines = []
+        for seg in result_segments:
+            time_str = f"[{seg.start:.2f}-{seg.end:.2f}]"
+            output_lines.append(f"{time_str} {seg.speaker}: {seg.text}")
+
+        text = "\n".join(output_lines)
+    else:
+        text = transcriber.transcribe_file(audio_file)
+
+    if output:
+        with open(output, "w") as f:
+            f.write(text)
+        click.echo(f"Saved to: {output}", err=True)
+    else:
+        click.echo(text)
 
 
 @main.command()
@@ -600,7 +693,6 @@ def config(show: bool, init: bool, model: str | None, device: str | None) -> Non
         click.echo(f"  device: {cfg.transcription.device}")
         click.echo(f"  language: {cfg.transcription.language}")
         click.echo(f"  beep_enabled: {cfg.audio.beep_enabled}")
-        click.echo(f"  output_method: {cfg.output.method}")
         click.echo("\nRun 'sttd config --init' to create a config file.")
 
 
@@ -623,6 +715,10 @@ def config(show: bool, init: bool, model: str | None, device: str | None) -> Non
 )
 @click.option("--device", default=None, help="Device: auto, cuda, cpu")
 @click.option("--force", is_flag=True, help="Overwrite existing profile")
+@click.option(
+    "--server", "server_url", default=None, help="Server URL for remote registration"
+)
+@click.option("--timeout", type=float, default=60.0, help="Request timeout in seconds (default: 60)")
 def register(
     name: str,
     audio_file: Path | None,
@@ -630,6 +726,8 @@ def register(
     duration: float,
     device: str | None,
     force: bool,
+    server_url: str | None,
+    timeout: float,
 ) -> None:
     """Register a voice profile for speaker identification.
 
@@ -642,12 +740,11 @@ def register(
         sttd register bob --record --duration 15
 
         sttd register alice -f new_sample.wav --force
+
+        sttd register alice -f alice_sample.wav --server http://192.168.1.100:8765
     """
     import time
     from datetime import datetime
-
-    from sttd.diarizer import ENROLLMENT_PROMPT, SpeakerEmbedder
-    from sttd.profiles import ProfileManager, VoiceProfile
 
     config = load_config()
 
@@ -658,19 +755,23 @@ def register(
         click.echo("Error: Use either --file or --record, not both", err=True)
         sys.exit(1)
 
-    pm = ProfileManager()
+    # For remote registration, we don't check local profile existence
+    if not server_url:
+        from sttd.profiles import ProfileManager
 
-    if pm.exists(name) and not force:
-        click.echo(f"Error: Profile '{name}' already exists. Use --force to overwrite.", err=True)
-        sys.exit(1)
+        pm = ProfileManager()
+        if pm.exists(name) and not force:
+            click.echo(f"Error: Profile '{name}' already exists. Use --force to overwrite.", err=True)
+            sys.exit(1)
 
     if record:
+        from sttd.diarizer import ENROLLMENT_PROMPT
+        from sttd.recorder import Recorder
+
         click.echo("Please read aloud:")
         click.echo(f'"{ENROLLMENT_PROMPT}"')
         click.echo()
         click.echo(f"Recording for {duration} seconds... Press Ctrl+C to stop early.")
-
-        from sttd.recorder import Recorder
 
         recorder = Recorder(config=config.audio)
         recorder.start()
@@ -700,26 +801,16 @@ def register(
         info = sf.info(str(audio_file))
         audio_duration = info.duration
 
-    click.echo(f"Extracting voice embedding from: {audio_file}", err=True)
+    # At this point audio_file is guaranteed to be set
+    assert audio_file is not None
 
     try:
-        dev = device or config.diarization.device
-        embedder = SpeakerEmbedder(
-            model_source=config.diarization.model,
-            device=dev,
-        )
-        embedding = embedder.extract_embedding(audio_file)
-
-        profile = VoiceProfile(
-            name=name,
-            embedding=embedding.tolist(),
-            created_at=datetime.now().isoformat(),
-            audio_duration=audio_duration,
-            model_version=embedder.model_source,
-        )
-
-        path = pm.save(profile)
-        click.echo(f"Profile '{name}' saved to: {path}")
+        if server_url:
+            # Remote registration
+            _register_remote(name, audio_file, server_url, timeout)
+        else:
+            # Local registration
+            _register_local(name, audio_file, audio_duration, device, config)
 
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
@@ -729,9 +820,113 @@ def register(
             audio_file.unlink()
 
 
-@main.command()
-def profiles() -> None:
-    """List registered voice profiles."""
+def _register_remote(name: str, audio_file: Path, server_url: str, timeout: float) -> None:
+    """Register a voice profile on a remote server."""
+    import soundfile as sf
+
+    from sttd.http_client import (
+        HttpConnectionError,
+        ServerError,
+        TranscriptionClient,
+    )
+
+    click.echo(f"Registering profile '{name}' on server: {server_url}", err=True)
+
+    # Load audio file
+    audio, sample_rate = sf.read(str(audio_file), dtype="float32")
+
+    # Convert stereo to mono if needed
+    if len(audio.shape) > 1:
+        audio = audio.mean(axis=1)
+
+    client = TranscriptionClient(server_url, timeout=timeout)
+
+    try:
+        result = client.create_profile(name, audio, sample_rate)
+        click.echo(f"Profile '{name}' registered on server")
+        if "audio_duration" in result:
+            click.echo(f"  Audio duration: {result['audio_duration']:.1f}s")
+    except ServerError as e:
+        click.echo(f"Server error: {e}", err=True)
+        sys.exit(1)
+    except HttpConnectionError as e:
+        click.echo(f"Connection error: {e}", err=True)
+        sys.exit(1)
+
+
+def _register_local(
+    name: str,
+    audio_file: Path,
+    audio_duration: float,
+    device: str | None,
+    config,
+) -> None:
+    """Register a voice profile locally."""
+    from datetime import datetime
+
+    from sttd.diarizer import SpeakerEmbedder
+    from sttd.profiles import ProfileManager, VoiceProfile
+
+    click.echo(f"Extracting voice embedding from: {audio_file}", err=True)
+
+    dev = device or config.diarization.device
+    embedder = SpeakerEmbedder(
+        model_source=config.diarization.model,
+        device=dev,
+    )
+    embedding = embedder.extract_embedding(audio_file)
+
+    profile = VoiceProfile(
+        name=name,
+        embedding=embedding.tolist(),
+        created_at=datetime.now().isoformat(),
+        audio_duration=audio_duration,
+        model_version=embedder.model_source,
+    )
+
+    pm = ProfileManager()
+    path = pm.save(profile)
+    click.echo(f"Profile '{name}' saved to: {path}")
+
+
+# Profile management command group
+@main.group(invoke_without_command=True)
+@click.pass_context
+def profiles(ctx: click.Context) -> None:
+    """Manage voice profiles.
+
+    When called without a subcommand, lists all profiles.
+
+    Examples:
+
+        sttd profiles                    # List local profiles
+
+        sttd profiles list               # List local profiles
+
+        sttd profiles list --server URL  # List remote profiles
+
+        sttd profiles show alice         # Show profile details
+
+        sttd profiles delete alice       # Delete a profile
+    """
+    # If no subcommand is invoked, default to listing profiles
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(profiles_list)
+
+
+@profiles.command("list")
+@click.option("--server", "server_url", default=None, help="Server URL for remote profiles")
+@click.option("--timeout", type=float, default=10.0, help="Request timeout in seconds")
+def profiles_list(server_url: str | None, timeout: float = 10.0) -> None:
+    """List all voice profiles (local or remote)."""
+    if server_url:
+        _list_profiles_remote(server_url, timeout)
+    else:
+        _list_profiles_local()
+
+
+def _list_profiles_local() -> None:
+    """List local voice profiles."""
     from sttd.profiles import ProfileManager
 
     pm = ProfileManager()
@@ -746,6 +941,159 @@ def profiles() -> None:
         click.echo(f"  {p.name}")
         click.echo(f"    Created: {p.created_at}")
         click.echo(f"    Audio duration: {p.audio_duration:.1f}s")
+
+
+def _list_profiles_remote(server_url: str, timeout: float) -> None:
+    """List remote voice profiles."""
+    from sttd.http_client import (
+        HttpConnectionError,
+        ServerError,
+        TranscriptionClient,
+    )
+
+    client = TranscriptionClient(server_url, timeout=timeout)
+
+    try:
+        profile_list = client.list_profiles()
+
+        if not profile_list:
+            click.echo(f"No profiles on server: {server_url}")
+            return
+
+        click.echo(f"Voice profiles on {server_url}:\n")
+        for p in profile_list:
+            name = p.get("name", "unknown")
+            created_at = p.get("created_at", "unknown")
+            audio_duration = p.get("audio_duration", 0)
+            click.echo(f"  {name}")
+            click.echo(f"    Created: {created_at}")
+            click.echo(f"    Audio duration: {audio_duration:.1f}s")
+
+    except ServerError as e:
+        click.echo(f"Server error: {e}", err=True)
+        sys.exit(1)
+    except HttpConnectionError as e:
+        click.echo(f"Connection error: {e}", err=True)
+        sys.exit(1)
+
+
+@profiles.command("show")
+@click.argument("name")
+@click.option("--server", "server_url", default=None, help="Server URL for remote profile")
+@click.option("--timeout", type=float, default=10.0, help="Request timeout in seconds")
+def profiles_show(name: str, server_url: str | None, timeout: float) -> None:
+    """Show details of a voice profile."""
+    if server_url:
+        _show_profile_remote(name, server_url, timeout)
+    else:
+        _show_profile_local(name)
+
+
+def _show_profile_local(name: str) -> None:
+    """Show local voice profile details."""
+    from sttd.profiles import ProfileManager
+
+    pm = ProfileManager()
+    profile = pm.load(name)
+
+    if not profile:
+        click.echo(f"Profile '{name}' not found", err=True)
+        sys.exit(1)
+
+    click.echo(f"Profile: {profile.name}\n")
+    click.echo(f"  Created: {profile.created_at}")
+    click.echo(f"  Audio duration: {profile.audio_duration:.1f}s")
+    click.echo(f"  Model version: {profile.model_version}")
+    click.echo(f"  Embedding dimensions: {len(profile.embedding)}")
+
+
+def _show_profile_remote(name: str, server_url: str, timeout: float) -> None:
+    """Show remote voice profile details."""
+    from sttd.http_client import (
+        HttpConnectionError,
+        ServerError,
+        TranscriptionClient,
+    )
+
+    client = TranscriptionClient(server_url, timeout=timeout)
+
+    try:
+        profile = client.get_profile(name)
+
+        if not profile:
+            click.echo(f"Profile '{name}' not found on server", err=True)
+            sys.exit(1)
+
+        click.echo(f"Profile: {profile.get('name', name)}\n")
+        click.echo(f"  Created: {profile.get('created_at', 'unknown')}")
+        click.echo(f"  Audio duration: {profile.get('audio_duration', 0):.1f}s")
+        if "model_version" in profile:
+            click.echo(f"  Model version: {profile['model_version']}")
+        if "embedding" in profile:
+            click.echo(f"  Embedding dimensions: {len(profile['embedding'])}")
+
+    except ServerError as e:
+        click.echo(f"Server error: {e}", err=True)
+        sys.exit(1)
+    except HttpConnectionError as e:
+        click.echo(f"Connection error: {e}", err=True)
+        sys.exit(1)
+
+
+@profiles.command("delete")
+@click.argument("name")
+@click.option("--server", "server_url", default=None, help="Server URL for remote profile")
+@click.option("--force", is_flag=True, help="Skip confirmation")
+@click.option("--timeout", type=float, default=10.0, help="Request timeout in seconds")
+def profiles_delete(name: str, server_url: str | None, force: bool, timeout: float) -> None:
+    """Delete a voice profile."""
+    if not force:
+        location = f"server {server_url}" if server_url else "local storage"
+        if not click.confirm(f"Delete profile '{name}' from {location}?"):
+            click.echo("Cancelled")
+            return
+
+    if server_url:
+        _delete_profile_remote(name, server_url, timeout)
+    else:
+        _delete_profile_local(name)
+
+
+def _delete_profile_local(name: str) -> None:
+    """Delete local voice profile."""
+    from sttd.profiles import ProfileManager
+
+    pm = ProfileManager()
+    if pm.delete(name):
+        click.echo(f"Profile '{name}' deleted")
+    else:
+        click.echo(f"Profile '{name}' not found", err=True)
+        sys.exit(1)
+
+
+def _delete_profile_remote(name: str, server_url: str, timeout: float) -> None:
+    """Delete remote voice profile."""
+    from sttd.http_client import (
+        HttpConnectionError,
+        ServerError,
+        TranscriptionClient,
+    )
+
+    client = TranscriptionClient(server_url, timeout=timeout)
+
+    try:
+        if client.delete_profile(name):
+            click.echo(f"Profile '{name}' deleted from server")
+        else:
+            click.echo(f"Profile '{name}' not found on server", err=True)
+            sys.exit(1)
+
+    except ServerError as e:
+        click.echo(f"Server error: {e}", err=True)
+        sys.exit(1)
+    except HttpConnectionError as e:
+        click.echo(f"Connection error: {e}", err=True)
+        sys.exit(1)
 
 
 @main.command()

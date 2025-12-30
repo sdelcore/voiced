@@ -31,8 +31,7 @@ This will automatically set up the development environment with:
 - Python 3.12
 - uv (package manager)
 - portaudio (for audio recording)
-- wtype (for text injection)
-- wl-clipboard (clipboard fallback)
+- wl-clipboard (for clipboard injection)
 - ffmpeg (audio format support)
 
 ### Setup

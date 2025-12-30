@@ -14,7 +14,7 @@ import numpy as np
 
 from sttd import audio
 from sttd.config import Config, get_cache_dir, load_config
-from sttd.http_client import ConnectionError, ServerError, TimeoutError, TranscriptionClient
+from sttd.http_client import HttpConnectionError, HttpTimeoutError, ServerError, TranscriptionClient
 from sttd.injector import inject_to_clipboard
 from sttd.recorder import Recorder
 from sttd.tray import TrayIcon, TrayState
@@ -164,7 +164,7 @@ class RemoteDaemon:
                 if self.config.audio.beep_enabled:
                     audio.beep_error()
 
-        except ConnectionError as e:
+        except HttpConnectionError as e:
             logger.error(f"Connection error: {e}")
             if self.config.audio.beep_enabled:
                 audio.beep_error()
@@ -172,7 +172,7 @@ class RemoteDaemon:
             logger.error(f"Server error: {e}")
             if self.config.audio.beep_enabled:
                 audio.beep_error()
-        except TimeoutError as e:
+        except HttpTimeoutError as e:
             logger.error(f"Timeout: {e}")
             if self.config.audio.beep_enabled:
                 audio.beep_error()
@@ -222,7 +222,7 @@ class RemoteDaemon:
                 f"Server available: model={health.get('model')}, device={health.get('device')}"
             )
             return True
-        except ConnectionError as e:
+        except HttpConnectionError as e:
             logger.error(f"Server not available: {e}")
             return False
 

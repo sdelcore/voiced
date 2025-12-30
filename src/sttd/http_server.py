@@ -3,15 +3,21 @@
 import io
 import json
 import logging
+import re
+import tempfile
 import threading
 import time
 import wave
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
 from sttd.config import Config, load_config
+from sttd.diarizer import SpeakerIdentifier
+from sttd.profiles import ProfileManager, VoiceProfile
 from sttd.transcriber import Transcriber
 
 logger = logging.getLogger(__name__)
@@ -52,6 +58,10 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
     request_count: int = 0
     protocol_version = "HTTP/1.1"
 
+    # Lazy-loaded speaker identifier (class attribute for sharing across requests)
+    _speaker_identifier: SpeakerIdentifier | None = None
+    _profile_manager: ProfileManager | None = None
+
     def log_message(self, format: str, *args) -> None:
         logger.info("%s - %s", self.address_string(), format % args)
 
@@ -66,6 +76,29 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
     def _send_error_json(self, status: int, message: str, code: str) -> None:
         self._send_json(status, {"error": message, "code": code})
 
+    def _get_profile_manager(self, profiles_path: str | None = None) -> ProfileManager:
+        """Get or create profile manager."""
+        if profiles_path:
+            return ProfileManager(profiles_path)
+        if TranscriptionHandler._profile_manager is None:
+            TranscriptionHandler._profile_manager = ProfileManager()
+        return TranscriptionHandler._profile_manager
+
+    def _get_speaker_identifier(self) -> SpeakerIdentifier:
+        """Get or create speaker identifier (lazy-loaded)."""
+        if TranscriptionHandler._speaker_identifier is None:
+            TranscriptionHandler._speaker_identifier = SpeakerIdentifier(
+                config=self.config.diarization
+            )
+        return TranscriptionHandler._speaker_identifier
+
+    def _parse_profile_name(self, path: str) -> str | None:
+        """Parse profile name from /profiles/{name} path."""
+        match = re.match(r"^/profiles/([^/]+)$", path)
+        if match:
+            return match.group(1)
+        return None
+
     def do_GET(self) -> None:
         parsed = urlparse(self.path)
         path = parsed.path
@@ -74,6 +107,14 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             self._handle_health()
         elif path == "/status":
             self._handle_status()
+        elif path == "/profiles":
+            self._handle_list_profiles()
+        elif path.startswith("/profiles/"):
+            name = self._parse_profile_name(path)
+            if name:
+                self._handle_get_profile(name)
+            else:
+                self._send_error_json(404, "Not found", "NOT_FOUND")
         else:
             self._send_error_json(404, "Not found", "NOT_FOUND")
 
@@ -83,6 +124,25 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
 
         if path == "/transcribe":
             self._handle_transcribe(parsed.query)
+        elif path.startswith("/profiles/"):
+            name = self._parse_profile_name(path)
+            if name:
+                self._handle_create_profile(name)
+            else:
+                self._send_error_json(404, "Not found", "NOT_FOUND")
+        else:
+            self._send_error_json(404, "Not found", "NOT_FOUND")
+
+    def do_DELETE(self) -> None:
+        parsed = urlparse(self.path)
+        path = parsed.path
+
+        if path.startswith("/profiles/"):
+            name = self._parse_profile_name(path)
+            if name:
+                self._handle_delete_profile(name)
+            else:
+                self._send_error_json(404, "Not found", "NOT_FOUND")
         else:
             self._send_error_json(404, "Not found", "NOT_FOUND")
 
@@ -126,6 +186,9 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
 
         query_params = parse_qs(query_string)
         language = query_params.get("language", [None])[0]
+        identify_speakers_param = query_params.get("identify_speakers", ["true"])[0]
+        identify_speakers = identify_speakers_param.lower() == "true"
+        profiles_path = query_params.get("profiles_path", [None])[0]
 
         wav_bytes = self.rfile.read(content_length)
 
@@ -145,7 +208,68 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
                 self.transcriber.config.language = language
 
             start_time = time.time()
-            text = self.transcriber.transcribe_audio(audio, sample_rate)
+
+            # Use transcribe method that returns segments with info
+            segments_raw, info = self._transcribe_with_info(audio, sample_rate)
+
+            # Build full text from segments
+            full_text = " ".join(text for _, _, text in segments_raw)
+
+            # Apply speaker identification if enabled
+            segments_output = []
+            if identify_speakers and segments_raw:
+                try:
+                    profile_manager = self._get_profile_manager(profiles_path)
+                    profiles = profile_manager.load_all()
+
+                    if profiles:
+                        identifier = self._get_speaker_identifier()
+                        identified = identifier.identify_segments_from_array(
+                            audio,
+                            sample_rate,
+                            segments_raw,
+                            profiles,
+                        )
+                        for seg in identified:
+                            segments_output.append({
+                                "start": round(seg.start, 2),
+                                "end": round(seg.end, 2),
+                                "text": seg.text,
+                                "speaker": seg.speaker,
+                                "speaker_confidence": round(seg.confidence, 2),
+                            })
+                    else:
+                        # No profiles, return segments without speaker info
+                        for start, end, text in segments_raw:
+                            segments_output.append({
+                                "start": round(start, 2),
+                                "end": round(end, 2),
+                                "text": text,
+                                "speaker": "Unknown",
+                                "speaker_confidence": 0.0,
+                            })
+                except Exception as e:
+                    logger.warning(f"Speaker identification failed: {e}")
+                    # Fall back to segments without speaker info
+                    for start, end, text in segments_raw:
+                        segments_output.append({
+                            "start": round(start, 2),
+                            "end": round(end, 2),
+                            "text": text,
+                            "speaker": "Unknown",
+                            "speaker_confidence": 0.0,
+                        })
+            else:
+                # No speaker identification, return segments without speaker info
+                for start, end, text in segments_raw:
+                    segments_output.append({
+                        "start": round(start, 2),
+                        "end": round(end, 2),
+                        "text": text,
+                        "speaker": "Unknown",
+                        "speaker_confidence": 0.0,
+                    })
+
             elapsed = time.time() - start_time
 
             if language:
@@ -156,15 +280,156 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             self._send_json(
                 200,
                 {
-                    "text": text,
+                    "text": full_text,
                     "duration": round(duration, 2),
-                    "language": language or original_language,
+                    "language": info.language,
+                    "language_probability": round(info.language_probability, 2),
                     "processing_time": round(elapsed, 2),
+                    "model": self.transcriber.config.model,
+                    "segments": segments_output,
                 },
             )
         except Exception as e:
             logger.exception(f"Transcription failed: {e}")
             self._send_error_json(500, f"Transcription failed: {e}", "TRANSCRIPTION_ERROR")
+
+    def _transcribe_with_info(
+        self, audio: np.ndarray, sample_rate: int
+    ) -> tuple[list[tuple[float, float, str]], any]:
+        """Transcribe audio and return segments with info object."""
+        audio = self.transcriber._normalize_audio(audio)
+        logger.info(f"Transcribing audio with segments: {len(audio)} samples at {sample_rate}Hz")
+
+        segments, info = self.transcriber.model.transcribe(
+            audio,
+            language=self.transcriber.config.language,
+            beam_size=5,
+            vad_filter=True,
+        )
+
+        logger.info(
+            f"Detected language: {info.language} (probability: {info.language_probability:.2f})"
+        )
+
+        result = []
+        for segment in segments:
+            result.append((segment.start, segment.end, segment.text.strip()))
+
+        return result, info
+
+    def _handle_list_profiles(self) -> None:
+        """Handle GET /profiles - list all profiles."""
+        try:
+            profile_manager = self._get_profile_manager()
+            profiles = profile_manager.load_all()
+
+            profiles_data = []
+            for p in profiles:
+                profiles_data.append({
+                    "name": p.name,
+                    "created_at": p.created_at,
+                    "audio_duration": p.audio_duration,
+                })
+
+            self._send_json(200, {"profiles": profiles_data})
+        except Exception as e:
+            logger.exception(f"Failed to list profiles: {e}")
+            self._send_error_json(500, f"Failed to list profiles: {e}", "PROFILE_ERROR")
+
+    def _handle_get_profile(self, name: str) -> None:
+        """Handle GET /profiles/{name} - get single profile."""
+        try:
+            profile_manager = self._get_profile_manager()
+            profile = profile_manager.load(name)
+
+            if profile is None:
+                self._send_error_json(404, f"Profile '{name}' not found", "PROFILE_NOT_FOUND")
+                return
+
+            self._send_json(200, {
+                "name": profile.name,
+                "created_at": profile.created_at,
+                "audio_duration": profile.audio_duration,
+                "model_version": profile.model_version,
+            })
+        except Exception as e:
+            logger.exception(f"Failed to get profile: {e}")
+            self._send_error_json(500, f"Failed to get profile: {e}", "PROFILE_ERROR")
+
+    def _handle_create_profile(self, name: str) -> None:
+        """Handle POST /profiles/{name} - create profile from audio."""
+        content_length = int(self.headers.get("Content-Length", 0))
+
+        if content_length == 0:
+            self._send_error_json(400, "No audio data provided", "NO_AUDIO")
+            return
+
+        if content_length > 50 * 1024 * 1024:
+            self._send_error_json(413, "Audio file too large (max 50MB)", "AUDIO_TOO_LARGE")
+            return
+
+        wav_bytes = self.rfile.read(content_length)
+
+        try:
+            audio, sample_rate = wav_to_audio(wav_bytes)
+        except Exception as e:
+            logger.error(f"Failed to parse WAV: {e}")
+            self._send_error_json(400, f"Invalid WAV format: {e}", "INVALID_AUDIO")
+            return
+
+        duration = len(audio) / sample_rate
+        logger.info(f"Creating profile '{name}' from {duration:.1f}s of audio")
+
+        try:
+            from sttd.diarizer import SpeakerEmbedder
+
+            # Get or create embedder
+            identifier = self._get_speaker_identifier()
+            embedder = identifier.embedder
+
+            # Extract embedding from audio
+            embedding = embedder.extract_embedding_from_array(audio, sample_rate)
+
+            # Create profile
+            profile = VoiceProfile(
+                name=name,
+                embedding=embedding.tolist(),
+                created_at=datetime.utcnow().isoformat(),
+                audio_duration=round(duration, 1),
+                model_version=embedder.model_source,
+            )
+
+            # Save profile
+            profile_manager = self._get_profile_manager()
+            profile_manager.save(profile)
+
+            self._send_json(201, {
+                "status": "created",
+                "name": name,
+                "audio_duration": round(duration, 1),
+                "model_version": embedder.model_source,
+            })
+        except Exception as e:
+            logger.exception(f"Failed to create profile: {e}")
+            self._send_error_json(500, f"Failed to create profile: {e}", "PROFILE_ERROR")
+
+    def _handle_delete_profile(self, name: str) -> None:
+        """Handle DELETE /profiles/{name} - delete profile."""
+        try:
+            profile_manager = self._get_profile_manager()
+
+            if not profile_manager.exists(name):
+                self._send_error_json(404, f"Profile '{name}' not found", "PROFILE_NOT_FOUND")
+                return
+
+            deleted = profile_manager.delete(name)
+            if deleted:
+                self._send_json(200, {"status": "deleted", "name": name})
+            else:
+                self._send_error_json(500, f"Failed to delete profile '{name}'", "DELETE_ERROR")
+        except Exception as e:
+            logger.exception(f"Failed to delete profile: {e}")
+            self._send_error_json(500, f"Failed to delete profile: {e}", "PROFILE_ERROR")
 
 
 class TranscriptionServer:
@@ -247,6 +512,11 @@ class TranscriptionServer:
         if self._thread:
             self._thread.join(timeout=5)
             self._thread = None
+
+        # Clean up speaker identifier if loaded
+        if TranscriptionHandler._speaker_identifier is not None:
+            TranscriptionHandler._speaker_identifier.unload()
+            TranscriptionHandler._speaker_identifier = None
 
         self.transcriber.unload()
         logger.info("HTTP server stopped")

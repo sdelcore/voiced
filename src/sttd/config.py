@@ -40,6 +40,7 @@ class DiarizationConfig:
     model: str = "speechbrain/spkrec-ecapa-voxceleb"  # SpeechBrain embedding model
     num_speakers: int | None = None  # Number of speakers (None = auto-detect)
     clustering_threshold: float = 0.7  # Clustering threshold when num_speakers is None
+    profiles_path: str | None = None  # Custom profiles directory path
 
 
 @dataclass
@@ -93,10 +94,21 @@ def get_pid_path() -> Path:
     return get_cache_dir() / "daemon.pid"
 
 
-def get_profiles_dir() -> Path:
-    """Get the directory for voice profiles."""
-    config_dir = get_config_path().parent
-    profiles_dir = config_dir / "profiles"
+def get_profiles_dir(override_path: str | None = None) -> Path:
+    """Get the directory for voice profiles.
+
+    Args:
+        override_path: Optional custom path to use instead of the default.
+                      If provided, this path will be used directly.
+
+    Returns:
+        Path to the profiles directory (created if it doesn't exist).
+    """
+    if override_path is not None:
+        profiles_dir = Path(override_path)
+    else:
+        config_dir = get_config_path().parent
+        profiles_dir = config_dir / "profiles"
     profiles_dir.mkdir(parents=True, exist_ok=True)
     return profiles_dir
 
@@ -179,6 +191,7 @@ min_segment_duration = 0.5  # Minimum segment length for embedding (seconds)
 # model = "speechbrain/spkrec-ecapa-voxceleb"  # SpeechBrain embedding model
 # num_speakers = 2       # Set if known, leave unset for auto-detect
 # clustering_threshold = 0.7  # Clustering threshold when num_speakers is None
+# profiles_path = "/path/to/profiles"  # Custom profiles directory (default: ~/.config/sttd/profiles)
 
 [server]
 host = "127.0.0.1"       # 0.0.0.0 to accept remote connections
