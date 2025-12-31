@@ -192,11 +192,12 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
 
         audio_bytes = self.rfile.read(content_length)
 
-        # Use soundfile for robust audio format detection (supports WAV, WebM, MP3, OGG, etc.)
+        # Use FFmpeg to convert any audio format to WAV, then read with soundfile
         import os
+        import subprocess
         import soundfile as sf
 
-        # Determine file extension from Content-Type header for better format detection
+        # Determine file extension from Content-Type header
         content_type = self.headers.get("Content-Type", "audio/wav")
         ext_map = {
             "audio/wav": ".wav",
@@ -211,18 +212,40 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         suffix = ext_map.get(content_type, ".wav")
 
         temp_path = None
+        wav_path = None
         try:
-            # Write to temp file for soundfile to read
+            # Write input audio to temp file
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as f:
                 f.write(audio_bytes)
                 temp_path = f.name
 
-            audio, sample_rate = sf.read(temp_path, dtype="float32")
+            # For non-WAV formats, convert to WAV using FFmpeg
+            if suffix != ".wav":
+                wav_path = temp_path.rsplit(".", 1)[0] + ".wav"
+                result = subprocess.run(
+                    [
+                        "ffmpeg", "-y", "-i", temp_path,
+                        "-ar", "16000",  # Resample to 16kHz (optimal for Whisper)
+                        "-ac", "1",      # Convert to mono
+                        "-f", "wav", wav_path
+                    ],
+                    capture_output=True,
+                    check=True,
+                )
+                audio_path = wav_path
+            else:
+                audio_path = temp_path
 
-            # Convert stereo to mono if needed
+            audio, sample_rate = sf.read(audio_path, dtype="float32")
+
+            # Convert stereo to mono if needed (for WAV input that wasn't converted)
             if len(audio.shape) > 1:
                 audio = audio.mean(axis=1)
 
+        except subprocess.CalledProcessError as e:
+            logger.error(f"FFmpeg conversion failed: {e.stderr.decode()}")
+            self._send_error_json(400, f"Failed to convert audio: {e.stderr.decode()}", "INVALID_AUDIO")
+            return
         except Exception as e:
             logger.error(f"Failed to read audio: {e}")
             self._send_error_json(400, f"Failed to read audio file: {e}", "INVALID_AUDIO")
@@ -230,6 +253,8 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         finally:
             if temp_path and os.path.exists(temp_path):
                 os.unlink(temp_path)
+            if wav_path and os.path.exists(wav_path):
+                os.unlink(wav_path)
 
         duration = len(audio) / sample_rate
         logger.info(f"Transcribing {duration:.1f}s of audio at {sample_rate}Hz")
