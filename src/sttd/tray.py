@@ -2,6 +2,8 @@
 
 This implementation uses the org.kde.StatusNotifierItem D-Bus interface
 which is supported by waybar and other Wayland-native status bars.
+
+Includes DBusMenu support for transcription history menu.
 """
 
 import logging
@@ -17,6 +19,8 @@ from dasbus.server.interface import dbus_interface, dbus_signal
 from dasbus.server.template import InterfaceTemplate
 from dasbus.typing import Bool, Byte, Int, List, ObjPath, Str, Tuple
 from PIL import Image, ImageDraw
+
+from sttd.dbusmenu import DBUSMENU_PATH, DBusMenuImplementation, DBusMenuInterface
 
 logger = logging.getLogger(__name__)
 
@@ -207,8 +211,8 @@ class StatusNotifierItemInterface(InterfaceTemplate):
 
     @property
     def Menu(self) -> ObjPath:
-        """D-Bus path to menu (empty if none)."""
-        return ObjPath("/")
+        """D-Bus path to menu."""
+        return ObjPath(DBUSMENU_PATH)
 
     @property
     def IconThemePath(self) -> Str:
@@ -296,21 +300,35 @@ class TrayIcon:
         self,
         on_toggle: Callable[[], None] | None = None,
         on_quit: Callable[[], None] | None = None,
+        get_history: Callable[[], list] | None = None,
+        get_history_by_id: Callable[[int], object | None] | None = None,
+        get_revision: Callable[[], int] | None = None,
+        on_copy_history: Callable[[str], None] | None = None,
     ):
         """Initialize the tray icon.
 
         Args:
             on_toggle: Callback when tray is clicked (toggle recording).
             on_quit: Callback when quit is requested.
+            get_history: Callback to get history entries for menu.
+            get_history_by_id: Callback to get specific history entry.
+            get_revision: Callback to get current menu revision.
+            on_copy_history: Callback when history item is selected.
         """
         self._on_toggle = on_toggle
         self._on_quit = on_quit
+        self._get_history = get_history
+        self._get_history_by_id = get_history_by_id
+        self._get_revision = get_revision
+        self._on_copy_history = on_copy_history
         self._state = TrayState.IDLE
         self._thread: threading.Thread | None = None
         self._running = False
         self._loop: EventLoop | None = None
         self._sni: StatusNotifierItem | None = None
         self._bus = None
+        self._dbusmenu: DBusMenuImplementation | None = None
+        self._dbusmenu_interface: DBusMenuInterface | None = None
 
     @property
     def state(self) -> TrayState:
@@ -366,6 +384,20 @@ class TrayIcon:
                     "Tray icon may not appear - ensure a SNI host is running (e.g., waybar)"
                 )
 
+            # Create and publish DBusMenu if history callbacks provided
+            if self._get_history is not None and self._on_copy_history is not None:
+                self._dbusmenu = DBusMenuImplementation(
+                    get_history=self._get_history,
+                    get_history_by_id=self._get_history_by_id,
+                    get_revision=self._get_revision or (lambda: 0),
+                    on_copy_history=self._on_copy_history,
+                    on_quit=self._on_quit or (lambda: None),
+                )
+                self._dbusmenu_interface = DBusMenuInterface(self._dbusmenu)
+                self._bus.publish_object(DBUSMENU_PATH, self._dbusmenu_interface)
+                self._dbusmenu._interface = self._dbusmenu_interface
+                logger.info("DBusMenu published")
+
             # Run the event loop
             self._loop = EventLoop()
             self._loop.run()
@@ -403,6 +435,15 @@ class TrayIcon:
             self._loop = None
 
         logger.info("Tray icon stopped")
+
+    def notify_menu_updated(self, revision: int) -> None:
+        """Notify that the menu layout has changed.
+
+        Args:
+            revision: The new menu revision number.
+        """
+        if self._dbusmenu:
+            self._dbusmenu.emit_layout_updated(revision)
 
     @property
     def is_running(self) -> bool:

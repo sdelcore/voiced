@@ -73,12 +73,13 @@ def beep_start() -> None:
 
 
 def beep_stop() -> None:
-    """Play the 'recording stopped' beep (descending tone)."""
-    tone1 = generate_tone(1200, 0.08, amplitude=0.25)
-    tone2 = generate_tone(800, 0.08, amplitude=0.25)
-    silence = np.zeros(int(SAMPLE_RATE * 0.02), dtype=np.float32)
+    """Play the 'recording stopped' beep (pleasant chime)."""
+    tone1 = generate_tone(523, 0.1, amplitude=0.2)  # C5
+    tone2 = generate_tone(659, 0.1, amplitude=0.2)  # E5
+    tone3 = generate_tone(784, 0.15, amplitude=0.2)  # G5
+    silence = np.zeros(int(SAMPLE_RATE * 0.03), dtype=np.float32)
 
-    audio = np.concatenate([tone1, silence, tone2])
+    audio = np.concatenate([tone1, silence, tone2, silence, tone3])
     sd.play(audio, SAMPLE_RATE)
     sd.wait()
 
@@ -91,12 +92,11 @@ def beep_error() -> None:
 
 
 def beep_success() -> None:
-    """Play a success beep (pleasant chime)."""
-    tone1 = generate_tone(523, 0.1, amplitude=0.2)  # C5
-    tone2 = generate_tone(659, 0.1, amplitude=0.2)  # E5
-    tone3 = generate_tone(784, 0.15, amplitude=0.2)  # G5
-    silence = np.zeros(int(SAMPLE_RATE * 0.03), dtype=np.float32)
+    """Play a success beep (descending tone)."""
+    tone1 = generate_tone(1200, 0.08, amplitude=0.25)
+    tone2 = generate_tone(800, 0.08, amplitude=0.25)
+    silence = np.zeros(int(SAMPLE_RATE * 0.02), dtype=np.float32)
 
-    audio = np.concatenate([tone1, silence, tone2, silence, tone3])
+    audio = np.concatenate([tone1, silence, tone2])
     sd.play(audio, SAMPLE_RATE)
     sd.wait()

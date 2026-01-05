@@ -5,7 +5,11 @@ import os
 import signal
 import sys
 import threading
+from collections import deque
+from dataclasses import dataclass
+from datetime import datetime
 from enum import Enum
+from queue import Queue
 
 import numpy as np
 
@@ -21,6 +25,115 @@ logger = logging.getLogger(__name__)
 
 # Lazy import to avoid loading HTTP server dependencies unless needed
 TranscriptionServer = None
+
+
+# History and Queue Data Structures
+
+
+@dataclass
+class HistoryEntry:
+    """A single transcription history entry."""
+
+    id: int
+    text: str
+    timestamp: datetime
+    preview: str
+
+    @staticmethod
+    def create(entry_id: int, text: str) -> "HistoryEntry":
+        """Create a new history entry with auto-generated preview."""
+        preview = text[:50] + "..." if len(text) > 50 else text
+        preview = preview.replace("\n", " ")
+        return HistoryEntry(id=entry_id, text=text, timestamp=datetime.now(), preview=preview)
+
+
+class TranscriptionHistory:
+    """Thread-safe circular buffer for transcription history."""
+
+    MAX_ENTRIES = 10
+
+    def __init__(self):
+        self._entries: deque[HistoryEntry] = deque(maxlen=self.MAX_ENTRIES)
+        self._lock = threading.Lock()
+        self._next_id = 1
+        self._revision = 0
+
+    def add(self, text: str) -> HistoryEntry:
+        """Add a new transcription to history. Thread-safe."""
+        with self._lock:
+            entry = HistoryEntry.create(self._next_id, text)
+            self._entries.appendleft(entry)
+            self._next_id += 1
+            self._revision += 1
+            return entry
+
+    def get_all(self) -> list[HistoryEntry]:
+        """Get all history entries (most recent first). Thread-safe."""
+        with self._lock:
+            return list(self._entries)
+
+    def get_by_id(self, entry_id: int) -> HistoryEntry | None:
+        """Get a specific entry by ID. Thread-safe."""
+        with self._lock:
+            for entry in self._entries:
+                if entry.id == entry_id:
+                    return entry
+            return None
+
+    @property
+    def revision(self) -> int:
+        """Current layout revision for DBusMenu."""
+        with self._lock:
+            return self._revision
+
+
+@dataclass
+class TranscriptionJob:
+    """A queued transcription job."""
+
+    audio_data: np.ndarray
+    job_id: int
+
+
+class TranscriptionQueue:
+    """Thread-safe queue for pending transcriptions."""
+
+    def __init__(self):
+        self._queue: Queue[TranscriptionJob] = Queue()
+        self._next_job_id = 1
+        self._lock = threading.Lock()
+        self._pending_count = 0
+
+    def enqueue(self, audio_data: np.ndarray) -> int:
+        """Add audio to the transcription queue. Returns job ID."""
+        with self._lock:
+            job_id = self._next_job_id
+            self._next_job_id += 1
+            self._pending_count += 1
+
+        job = TranscriptionJob(audio_data=audio_data, job_id=job_id)
+        self._queue.put(job)
+        return job_id
+
+    def dequeue(self, timeout: float = 0.5) -> TranscriptionJob | None:
+        """Get next job from queue. Returns None if empty/timeout."""
+        try:
+            job = self._queue.get(timeout=timeout)
+            with self._lock:
+                self._pending_count -= 1
+            return job
+        except Exception:
+            return None
+
+    @property
+    def pending_count(self) -> int:
+        """Number of jobs waiting in queue."""
+        with self._lock:
+            return self._pending_count
+
+    def is_empty(self) -> bool:
+        """Check if queue is empty."""
+        return self._queue.empty()
 
 
 def _get_transcription_server():
@@ -91,6 +204,18 @@ class Daemon:
         self._tray: TrayIcon | None = None
         self._http_server = None  # TranscriptionServer instance
 
+        # History and transcription queue
+        self._history = TranscriptionHistory()
+        self._transcription_queue = TranscriptionQueue()
+
+        # Background transcription worker
+        self._transcription_worker: threading.Thread | None = None
+        self._worker_stop_event = threading.Event()
+
+        # Track if transcription is active (for tray icon)
+        self._is_transcribing = False
+        self._transcription_lock = threading.Lock()
+
         # PID file
         self._pid_path = get_pid_path()
 
@@ -121,12 +246,16 @@ class Daemon:
                 logger.warning(f"Failed to remove PID file: {e}")
 
     def _handle_toggle(self, args: dict) -> dict:
-        """Handle toggle command."""
+        """Handle toggle command.
+
+        Recording can start even while transcription is processing in the background.
+        """
         if self._state == DaemonState.IDLE:
             return self._start_recording()
         elif self._state == DaemonState.RECORDING:
             return self._stop_recording()
         else:
+            # Should not reach here with new state machine
             return {
                 "status": "busy",
                 "message": f"Daemon is busy ({self._state.value})",
@@ -134,9 +263,14 @@ class Daemon:
 
     def _handle_status(self, args: dict) -> dict:
         """Handle status command."""
+        with self._transcription_lock:
+            is_transcribing = self._is_transcribing
         return {
             "status": "ok",
             "state": self._state.value,
+            "transcribing": is_transcribing,
+            "queue_pending": self._transcription_queue.pending_count,
+            "history_count": len(self._history.get_all()),
             "model": self.config.transcription.model,
             "device": self.config.transcription.device,
         }
@@ -166,7 +300,11 @@ class Daemon:
         return {"status": "ok", "state": "recording"}
 
     def _stop_recording(self) -> dict:
-        """Stop recording and start transcription."""
+        """Stop recording and queue transcription.
+
+        Returns immediately to IDLE state, allowing new recordings to start
+        while previous transcriptions are processed in the background.
+        """
         if self._recorder is None or not self._recorder.is_recording:
             return {"status": "error", "message": "Not recording"}
 
@@ -177,36 +315,82 @@ class Daemon:
         # Stop recording
         audio_data = self._recorder.stop()
 
-        self._state = DaemonState.TRANSCRIBING
+        # Return to IDLE immediately (allows new recordings)
+        self._state = DaemonState.IDLE
         self._update_tray_state()
 
         if len(audio_data) == 0:
-            self._state = DaemonState.IDLE
-            self._update_tray_state()
             return {"status": "error", "message": "No audio recorded"}
 
-        # Transcribe in a separate thread to not block
-        threading.Thread(
-            target=self._transcribe_and_inject,
-            args=(audio_data,),
+        # Queue for background transcription
+        job_id = self._transcription_queue.enqueue(audio_data)
+        logger.info(f"Queued transcription job {job_id}")
+
+        return {
+            "status": "ok",
+            "state": "queued",
+            "job_id": job_id,
+            "queue_pending": self._transcription_queue.pending_count,
+        }
+
+    def _start_transcription_worker(self) -> None:
+        """Start the background transcription worker thread."""
+        self._worker_stop_event.clear()
+        self._transcription_worker = threading.Thread(
+            target=self._transcription_worker_loop,
             daemon=True,
-        ).start()
+            name="TranscriptionWorker",
+        )
+        self._transcription_worker.start()
+        logger.info("Transcription worker started")
 
-        return {"status": "ok", "state": "transcribing"}
+    def _stop_transcription_worker(self) -> None:
+        """Stop the background transcription worker."""
+        self._worker_stop_event.set()
+        if self._transcription_worker is not None:
+            self._transcription_worker.join(timeout=2.0)
+            self._transcription_worker = None
+        logger.info("Transcription worker stopped")
 
-    def _transcribe_and_inject(self, audio_data: np.ndarray) -> None:
-        """Transcribe audio and copy to clipboard."""
+    def _transcription_worker_loop(self) -> None:
+        """Background loop that processes queued transcriptions one at a time."""
+        while not self._worker_stop_event.is_set():
+            job = self._transcription_queue.dequeue(timeout=0.5)
+            if job is None:
+                continue
+
+            self._process_transcription_job(job)
+
+    def _process_transcription_job(self, job: TranscriptionJob) -> None:
+        """Process a single transcription job."""
+        logger.info(f"Processing transcription job {job.job_id}")
+
+        # Update tray to show transcribing
+        with self._transcription_lock:
+            self._is_transcribing = True
+        self._update_tray_state()
+
         try:
             if self._transcriber is None:
                 self._transcriber = Transcriber(self.config.transcription)
 
             text = self._transcriber.transcribe_audio(
-                audio_data,
+                job.audio_data,
                 sample_rate=self.config.audio.sample_rate,
             )
 
             if text:
-                logger.info(f"Transcribed: {text[:100]}...")
+                logger.info(f"Job {job.job_id} transcribed: {text[:100]}...")
+
+                # Add to history
+                entry = self._history.add(text)
+                logger.debug(f"Added to history: entry {entry.id}")
+
+                # Notify tray menu of layout change
+                if self._tray is not None:
+                    self._tray.notify_menu_updated(self._history.revision)
+
+                # Copy to clipboard
                 success = inject_to_clipboard(text)
 
                 if success and self.config.audio.beep_enabled:
@@ -214,29 +398,34 @@ class Daemon:
                 elif not success and self.config.audio.beep_enabled:
                     audio.beep_error()
             else:
-                logger.warning("No text transcribed")
+                logger.warning(f"Job {job.job_id}: No text transcribed")
                 if self.config.audio.beep_enabled:
                     audio.beep_error()
 
         except Exception:
-            logger.exception("Transcription error")
+            logger.exception(f"Transcription error for job {job.job_id}")
             if self.config.audio.beep_enabled:
                 audio.beep_error()
         finally:
-            self._state = DaemonState.IDLE
+            with self._transcription_lock:
+                self._is_transcribing = False
             self._update_tray_state()
 
     def _update_tray_state(self) -> None:
-        """Update tray icon to match daemon state."""
+        """Update tray icon to match daemon state.
+
+        The tray shows TRANSCRIBING if background transcription is active,
+        even when the daemon state is IDLE (allowing new recordings).
+        """
         if self._tray is None:
             return
 
-        state_map = {
-            DaemonState.IDLE: TrayState.IDLE,
-            DaemonState.RECORDING: TrayState.RECORDING,
-            DaemonState.TRANSCRIBING: TrayState.TRANSCRIBING,
-        }
-        self._tray.set_state(state_map.get(self._state, TrayState.IDLE))
+        if self._state == DaemonState.RECORDING:
+            self._tray.set_state(TrayState.RECORDING)
+        elif self._is_transcribing:
+            self._tray.set_state(TrayState.TRANSCRIBING)
+        else:
+            self._tray.set_state(TrayState.IDLE)
 
     def _on_tray_toggle(self) -> None:
         """Handle tray icon toggle click."""
@@ -245,6 +434,15 @@ class Daemon:
     def _on_tray_quit(self) -> None:
         """Handle tray icon quit click."""
         self._shutdown_event.set()
+
+    def _on_copy_history(self, text: str) -> None:
+        """Handle copying a history item to clipboard."""
+        logger.info(f"Copying history item to clipboard: {text[:50]}...")
+        success = inject_to_clipboard(text)
+        if success and self.config.audio.beep_enabled:
+            audio.beep_success()
+        elif not success:
+            logger.error("Failed to copy history item to clipboard")
 
     def _setup_signals(self) -> None:
         """Set up signal handlers."""
@@ -271,10 +469,14 @@ class Daemon:
             self._server.register_handler("stop", self._handle_stop)
             self._server.start()
 
-            # Start tray icon
+            # Start tray icon with history callbacks
             self._tray = TrayIcon(
                 on_toggle=self._on_tray_toggle,
                 on_quit=self._on_tray_quit,
+                get_history=self._history.get_all,
+                get_history_by_id=self._history.get_by_id,
+                get_revision=lambda: self._history.revision,
+                on_copy_history=self._on_copy_history,
             )
             self._tray.start()
             logger.info("Tray icon started")
@@ -284,6 +486,9 @@ class Daemon:
             self._transcriber = Transcriber(self.config.transcription)
             _ = self._transcriber.model  # Trigger model load
             logger.info("Model loaded")
+
+            # Start background transcription worker
+            self._start_transcription_worker()
 
             # Start HTTP server if enabled (shares transcriber with daemon)
             if self._http_enabled:
@@ -325,7 +530,10 @@ class Daemon:
         logger.info("Cleaning up")
         self._running = False
 
-        # Stop HTTP server first (it may be using the transcriber)
+        # Stop transcription worker first
+        self._stop_transcription_worker()
+
+        # Stop HTTP server (it may be using the transcriber)
         if self._http_server is not None:
             self._http_server.stop()
             self._http_server = None
