@@ -20,7 +20,7 @@ from dasbus.server.template import InterfaceTemplate
 from dasbus.typing import Bool, Byte, Int, List, ObjPath, Str, Tuple
 from PIL import Image, ImageDraw
 
-from sttd.dbusmenu import DBUSMENU_PATH, DBusMenuImplementation, DBusMenuInterface
+from sttd.dbusmenu import DBUSMENU_PATH, DBusMenuImplementation
 
 logger = logging.getLogger(__name__)
 
@@ -328,7 +328,6 @@ class TrayIcon:
         self._sni: StatusNotifierItem | None = None
         self._bus = None
         self._dbusmenu: DBusMenuImplementation | None = None
-        self._dbusmenu_interface: DBusMenuInterface | None = None
 
     @property
     def state(self) -> TrayState:
@@ -384,19 +383,19 @@ class TrayIcon:
                     "Tray icon may not appear - ensure a SNI host is running (e.g., waybar)"
                 )
 
-            # Create and publish DBusMenu if history callbacks provided
+            # Create and register DBusMenu if history callbacks provided
             if self._get_history is not None and self._on_copy_history is not None:
                 self._dbusmenu = DBusMenuImplementation(
                     get_history=self._get_history,
-                    get_history_by_id=self._get_history_by_id,
+                    get_history_by_id=self._get_history_by_id or (lambda x: None),
                     get_revision=self._get_revision or (lambda: 0),
                     on_copy_history=self._on_copy_history,
                     on_quit=self._on_quit or (lambda: None),
                 )
-                self._dbusmenu_interface = DBusMenuInterface(self._dbusmenu)
-                self._bus.publish_object(DBUSMENU_PATH, self._dbusmenu_interface)
-                self._dbusmenu._interface = self._dbusmenu_interface
-                logger.info("DBusMenu published")
+                # Get the underlying Gio.DBusConnection from dasbus
+                gio_connection = self._bus.connection
+                if self._dbusmenu.register(gio_connection):
+                    logger.info("DBusMenu published")
 
             # Run the event loop
             self._loop = EventLoop()
