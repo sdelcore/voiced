@@ -1,1 +1,1 @@
-"""Tests for sttd."""
+"""Tests for voiced."""

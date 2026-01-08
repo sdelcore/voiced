@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from sttd.config import get_profiles_dir
+from voiced.config import get_profiles_dir
 
 logger = logging.getLogger(__name__)
 

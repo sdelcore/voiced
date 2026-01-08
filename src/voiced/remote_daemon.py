@@ -1,4 +1,4 @@
-"""Remote client daemon for sttd.
+"""Remote client daemon for voiced.
 
 Records audio locally and sends to a remote server for transcription.
 """
@@ -12,12 +12,12 @@ from enum import Enum
 
 import numpy as np
 
-from sttd import audio
-from sttd.config import Config, get_cache_dir, load_config
-from sttd.http_client import HttpConnectionError, HttpTimeoutError, ServerError, TranscriptionClient
-from sttd.injector import inject_to_clipboard
-from sttd.recorder import Recorder
-from sttd.tray import TrayIcon, TrayState
+from voiced import audio
+from voiced.config import Config, get_cache_dir, load_config
+from voiced.http_client import HttpConnectionError, HttpTimeoutError, ServerError, TranscriptionClient
+from voiced.injector import inject_to_clipboard
+from voiced.recorder import Recorder
+from voiced.tray import TrayIcon, TrayState
 
 logger = logging.getLogger(__name__)
 

@@ -1,12 +1,12 @@
 [project]
-name = "sttd"
-version = "0.1.0"
-description = "Speech-to-Text library with speaker identification, also runs as a daemon for Wayland"
+name = "voiced"
+version = "0.2.0"
+description = "Voice daemon - Speech-to-Text and Text-to-Speech for Linux/Wayland"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "sdelcore" }]
-keywords = ["speech-to-text", "whisper", "transcription", "speaker-identification", "diarization", "faster-whisper", "daemon", "wayland"]
+keywords = ["speech-to-text", "text-to-speech", "whisper", "tts", "stt", "transcription", "speaker-identification", "faster-whisper", "vibevoice", "daemon", "wayland"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -22,18 +22,25 @@ classifiers = [
 ]
 
 dependencies = [
+    # STT dependencies
     "faster-whisper>=1.0.0",
+    "speechbrain>=1.0.0,<1.1.0",
+    # TTS dependencies (VibeVoice installed separately)
+    "tqdm>=4.65.0",
+    "websockets>=12.0",
+    # Shared dependencies
     "sounddevice>=0.4.6",
+    "soundfile>=0.12.0",
     "numpy>=1.24.0",
+    "scipy>=1.10.0",
     "click>=8.1.0",
+    "requests>=2.28.0",
+    "huggingface_hub>=0.20.0,<1.0.0",
+    # Linux/Wayland integration
     "dasbus>=1.7",
     "Pillow>=10.0.0",
     "PyGObject>=3.42.0",
-    "speechbrain>=1.0.0,<1.1.0",
-    "huggingface_hub>=0.20.0,<1.0.0",
-    "soundfile>=0.12.0",
-    "scipy>=1.10.0",
-    "requests>=2.28.0",
+    # Speaker identification
     "scikit-learn>=1.0.0",
 ]
 
@@ -44,14 +51,14 @@ dev = [
 ]
 
 [project.scripts]
-sttd = "sttd.cli:main"
+voiced = "voiced.cli:main"
 
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/sttd"]
+packages = ["src/voiced"]
 
 [tool.ruff]
 line-length = 100

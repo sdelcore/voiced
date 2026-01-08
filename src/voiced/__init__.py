@@ -1,16 +1,16 @@
-"""sttd - Speech-to-Text Daemon.
+"""voiced - Voice Daemon.
 
-A Python library for speech-to-text transcription using faster-whisper,
-with optional speaker identification using SpeechBrain.
+A Python library for speech-to-text (STT) and text-to-speech (TTS) for Linux/Wayland.
+Uses faster-whisper for STT and VibeVoice for TTS, with optional speaker identification.
 
-Basic usage:
-    from sttd import Transcriber, TranscriptionConfig
+Basic STT usage:
+    from voiced import Transcriber, TranscriptionConfig
 
     transcriber = Transcriber()
     text = transcriber.transcribe_file("audio.wav")
 
 With speaker identification:
-    from sttd import Transcriber, SpeakerIdentifier, ProfileManager
+    from voiced import Transcriber, SpeakerIdentifier, ProfileManager
 
     transcriber = Transcriber()
     segments = transcriber.transcribe_file_with_segments("meeting.wav")
@@ -23,11 +23,11 @@ With speaker identification:
         print(f"[{seg.start:.1f}-{seg.end:.1f}] {seg.speaker}: {seg.text}")
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # Core transcription
 # Configuration classes
-from sttd.config import (
+from voiced.config import (
     AudioConfig,
     Config,
     DiarizationConfig,
@@ -35,7 +35,7 @@ from sttd.config import (
 )
 
 # Speaker identification
-from sttd.diarizer import (
+from voiced.diarizer import (
     ENROLLMENT_PROMPT,
     DiarizedSegment,
     IdentifiedSegment,
@@ -46,11 +46,11 @@ from sttd.diarizer import (
 )
 
 # Voice profiles
-from sttd.profiles import ProfileManager, VoiceProfile
+from voiced.profiles import ProfileManager, VoiceProfile
 
 # Audio recording
-from sttd.recorder import Recorder
-from sttd.transcriber import Transcriber
+from voiced.recorder import Recorder
+from voiced.transcriber import Transcriber
 
 __all__ = [
     # Version

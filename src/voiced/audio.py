@@ -1,4 +1,4 @@
-"""Audio feedback (beep sounds) for sttd."""
+"""Audio feedback (beep sounds) for voiced."""
 
 import logging
 

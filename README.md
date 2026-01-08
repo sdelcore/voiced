@@ -1,13 +1,14 @@
-# sttd - Speech-to-Text Daemon
+# voiced - Voice Daemon
 
-A speech-to-text daemon for Linux/Wayland, optimized for Hyprland. Bind a hotkey to toggle recording, and transcribed text is copied to your clipboard.
+A voice daemon for Linux/Wayland providing both **Speech-to-Text (STT)** and **Text-to-Speech (TTS)**. Optimized for Hyprland with hotkey support.
 
 ## Features
 
-- Hotkey toggle - bind `sttd toggle` to any key
+### STT (Speech-to-Text)
+- Hotkey toggle - bind `voiced toggle` to any key
 - Record-then-transcribe workflow
 - **Client-server mode** - run transcription on a remote GPU server
-- System tray integration
+- System tray integration with modern icons
 - GPU acceleration with CPU fallback
 - Multiple Whisper models (tiny to large-v3)
 - Audio feedback on start/stop
@@ -16,6 +17,14 @@ A speech-to-text daemon for Linux/Wayland, optimized for Hyprland. Bind a hotkey
 - Speaker diarization with spectral clustering
 - Voice profile matching for speaker identification
 
+### TTS (Text-to-Speech)
+- High-quality synthesis using VibeVoice
+- Multiple voice presets (emma, mike, carter, davis, frank, grace)
+- Low-latency streaming playback
+- Speak from clipboard or stdin
+- Save audio to file
+- HTTP API for remote synthesis
+
 ## Installation
 
 ### Prerequisites (NixOS)
@@ -23,7 +32,7 @@ A speech-to-text daemon for Linux/Wayland, optimized for Hyprland. Bind a hotkey
 This project uses Nix flakes for development. With direnv installed:
 
 ```bash
-cd sttd
+cd voiced
 direnv allow
 ```
 
@@ -41,44 +50,67 @@ This will automatically set up the development environment with:
 uv venv
 source .venv/bin/activate
 uv pip install -e ".[dev]"
+
+# For TTS support, also install VibeVoice:
+pip install git+https://github.com/microsoft/VibeVoice.git
 ```
 
 ## Usage
 
-### Daemon Mode
+### Daemon Mode (STT)
 
 Start the daemon:
 ```bash
-sttd start           # Run in foreground
-sttd start --daemon  # Run in background
+voiced start           # Run in foreground
+voiced start --daemon  # Run in background
 ```
 
 Toggle recording (bind this to a hotkey):
 ```bash
-sttd toggle
+voiced toggle
 ```
 
 Check status:
 ```bash
-sttd status
+voiced status
 ```
 
 Stop the daemon:
 ```bash
-sttd stop
+voiced stop
+```
+
+### Text-to-Speech
+
+Speak text:
+```bash
+voiced speak "Hello world"
+voiced speak --stream "Low latency streaming"   # Streaming playback
+voiced speak --clipboard                         # Speak clipboard contents
+echo "Hello" | voiced speak --stdin              # From stdin
+voiced speak "Save this" -o output.wav           # Save to file
+voiced speak "Hello" --voice mike                # Different voice
+```
+
+Manage voice presets:
+```bash
+voiced voices                    # List available voices
+voiced voices download emma      # Download a voice preset
+voiced voices info emma          # Show voice details
+voiced voices remove emma        # Remove cached voice
 ```
 
 ### Daemon with HTTP API
 
-The daemon can also expose an HTTP API for remote transcription requests. This allows a single process to handle both hotkey-triggered recording and HTTP API requests, sharing one model instance:
+The daemon can also expose an HTTP API for remote transcription and TTS requests:
 
 ```bash
-sttd start --http                      # Enable HTTP API on 127.0.0.1:8765
-sttd start --http --http-host 0.0.0.0  # Accept remote connections
-sttd start --http --http-port 9000     # Custom port
+voiced start --http                      # Enable HTTP API on 127.0.0.1:8765
+voiced start --http --http-host 0.0.0.0  # Accept remote connections
+voiced start --http --http-port 9000     # Custom port
 ```
 
-Or enable via config (`~/.config/sttd/config.toml`):
+Or enable via config (`~/.config/voiced/config.toml`):
 ```toml
 [daemon]
 http_enabled = true
@@ -91,10 +123,10 @@ http_port = 8765
 For headless deployments without a display (e.g., dedicated GPU server):
 
 ```bash
-sttd server                     # Local only (127.0.0.1:8765)
-sttd server --host 0.0.0.0      # Accept remote connections
-sttd server --port 9000         # Custom port
-sttd server -d                  # Run in background
+voiced server                     # Local only (127.0.0.1:8765)
+voiced server --host 0.0.0.0      # Accept remote connections
+voiced server --port 9000         # Custom port
+voiced server -d                  # Run in background
 ```
 
 ### Remote Client
@@ -102,47 +134,53 @@ sttd server -d                  # Run in background
 Record locally on an underpowered client, send to a remote server for transcription:
 
 ```bash
-sttd client --server http://192.168.1.100:8765
-sttd client -d                  # Run in background
+voiced client --server http://192.168.1.100:8765
+voiced client -d                  # Run in background
 
 # Or set server URL via environment
-STTD_SERVER_URL=http://server:8765 sttd client
+VOICED_SERVER_URL=http://server:8765 voiced client
 ```
 
 The client records audio locally, sends it to the server for transcription, and copies the result to clipboard.
 
 **Test with curl:**
 ```bash
+# Transcription
 curl -X POST -H "Content-Type: audio/wav" \
   --data-binary @audio.wav \
   http://localhost:8765/transcribe
+
+# TTS synthesis
+curl -X POST -H "Content-Type: application/json" \
+  -d '{"text": "Hello world", "voice": "emma"}' \
+  http://localhost:8765/synthesize --output speech.wav
 ```
 
 ### Hyprland Configuration
 
 Add to `~/.config/hypr/hyprland.conf`:
 ```
-bind = SUPER, R, exec, sttd toggle
+bind = SUPER, R, exec, voiced toggle
 ```
 
 ### Record and Transcribe
 
 Record from microphone and transcribe with timestamps:
 ```bash
-sttd record                         # Record until Ctrl+C, output timestamps
-sttd record -o transcript.txt       # Save to file
-sttd record --annotate              # With speaker diarization
-sttd record --annotate --num-speakers 2
+voiced record                         # Record until Ctrl+C, output timestamps
+voiced record -o transcript.txt       # Save to file
+voiced record --annotate              # With speaker diarization
+voiced record --annotate --num-speakers 2
 ```
 
 ### File Transcription
 
 Transcribe an audio file:
 ```bash
-sttd transcribe audio.wav                    # Output to stdout
-sttd transcribe audio.mp3 -o transcript.txt  # Output to file
-sttd transcribe audio.wav --model large-v3   # Use a specific model
-sttd transcribe meeting.wav --annotate --num-speakers 3  # With diarization
+voiced transcribe audio.wav                    # Output to stdout
+voiced transcribe audio.mp3 -o transcript.txt  # Output to file
+voiced transcribe audio.wav --model large-v3   # Use a specific model
+voiced transcribe meeting.wav --annotate --num-speakers 3  # With diarization
 ```
 
 ### Speaker Identification
@@ -151,16 +189,16 @@ Register voice profiles to identify speakers in transcriptions:
 
 ```bash
 # Register a speaker from an audio file
-sttd register alice -f alice_sample.wav
+voiced register alice -f alice_sample.wav
 
 # Or record directly from microphone
-sttd register bob --record --duration 15
+voiced register bob --record --duration 15
 
 # List registered profiles
-sttd profiles
+voiced profiles
 
 # Transcribe with speaker labels
-sttd transcribe meeting.wav --annotate
+voiced transcribe meeting.wav --annotate
 ```
 
 Output with `--annotate`:
@@ -174,10 +212,10 @@ Output with `--annotate`:
 
 Create a config file:
 ```bash
-sttd config --init
+voiced config --init
 ```
 
-Configuration file: `~/.config/sttd/config.toml`
+Configuration file: `~/.config/voiced/config.toml`
 
 ```toml
 [transcription]
@@ -191,6 +229,14 @@ sample_rate = 16000
 channels = 1
 device = "default"
 beep_enabled = true
+
+[tts]
+enabled = true           # Enable TTS (requires VibeVoice)
+model = "microsoft/VibeVoice-Realtime-0.5B"
+device = "auto"          # auto, cuda, mps, cpu
+default_voice = "emma"   # carter, davis, emma, frank, grace, mike
+cfg_scale = 1.5          # Classifier-free guidance scale
+unload_timeout_minutes = 60  # Auto-unload after inactivity
 
 [diarization]
 device = "auto"          # auto, cuda, cpu
@@ -216,21 +262,21 @@ timeout = 60.0           # Request timeout in seconds
 ### List Audio Devices
 
 ```bash
-sttd devices
+voiced devices
 ```
 
 ## Library Usage
 
-sttd can be used as a Python library in your own projects:
+voiced can be used as a Python library in your own projects:
 
 ```bash
-pip install sttd
+pip install voiced
 ```
 
 ### Basic Transcription
 
 ```python
-from sttd import Transcriber, TranscriptionConfig
+from voiced import Transcriber, TranscriptionConfig
 
 # Use defaults (base model, auto device detection)
 transcriber = Transcriber()
@@ -246,7 +292,7 @@ text = transcriber.transcribe_file("audio.wav")
 ### Transcribe with Timestamps
 
 ```python
-from sttd import Transcriber
+from voiced import Transcriber
 
 transcriber = Transcriber()
 segments = transcriber.transcribe_file_with_segments("audio.wav")
@@ -255,10 +301,28 @@ for start, end, text in segments:
     print(f"[{start:.2f}-{end:.2f}] {text}")
 ```
 
+### Text-to-Speech
+
+```python
+from voiced.synthesizer import Synthesizer, TTSConfig
+
+# Create synthesizer with config
+config = TTSConfig(default_voice="emma", device="cuda")
+synth = Synthesizer(config)
+
+# Generate audio
+audio = synth.synthesize("Hello, world!")
+
+# Or stream for low latency
+for chunk in synth.synthesize_streaming("Hello, world!"):
+    # Process audio chunks as they arrive
+    play_audio(chunk)
+```
+
 ### Speaker Diarization
 
 ```python
-from sttd import Transcriber, SpeakerDiarizer, align_transcription_with_diarization
+from voiced import Transcriber, SpeakerDiarizer, align_transcription_with_diarization
 
 transcriber = Transcriber()
 diarizer = SpeakerDiarizer()
@@ -277,7 +341,7 @@ for seg in aligned:
 ### Speaker Identification with Profiles
 
 ```python
-from sttd import Transcriber, SpeakerIdentifier, ProfileManager
+from voiced import Transcriber, SpeakerIdentifier, ProfileManager
 
 # First, transcribe with segments
 transcriber = Transcriber()
@@ -295,7 +359,7 @@ for seg in identified:
 ### Audio Recording
 
 ```python
-from sttd import Recorder, AudioConfig
+from voiced import Recorder, AudioConfig
 
 config = AudioConfig(sample_rate=16000, channels=1)
 recorder = Recorder(config)
@@ -307,7 +371,7 @@ audio = recorder.stop()  # Returns numpy array
 
 ## Models
 
-Available Whisper models (via faster-whisper):
+### STT Models (faster-whisper)
 
 | Model | Size | Speed | Accuracy |
 |-------|------|-------|----------|
@@ -317,39 +381,49 @@ Available Whisper models (via faster-whisper):
 | medium | ~1.5GB | Slower | High |
 | large-v3 | ~3GB | Slowest | Highest |
 
+### TTS Model (VibeVoice)
+
+| Model | Size | Quality |
+|-------|------|---------|
+| VibeVoice-Realtime-0.5B | ~1GB | High quality, near real-time |
+
+Available voices: `carter`, `davis`, `emma`, `frank`, `grace`, `mike`
+
 ## Architecture
 
-**Desktop mode** (`sttd start`):
+**Desktop mode** (`voiced start`):
 ```
-CLI (sttd toggle) → Unix Socket → Daemon
-                                    ├── Recorder (sounddevice)
-                                    ├── Transcriber (faster-whisper)
-                                    ├── Injector (wl-clipboard)
-                                    └── Tray Icon (D-Bus SNI)
-```
-
-**Desktop + HTTP mode** (`sttd start --http`):
-```
-CLI (sttd toggle) → Unix Socket → Daemon
-                                    ├── Recorder (sounddevice)
-                                    ├── Transcriber (faster-whisper) ←─┐
-                                    ├── Injector (wl-clipboard)        │ shared
-                                    ├── Tray Icon (D-Bus SNI)          │
-                                    └── HTTP Server ───────────────────┘
-                                          ↑
-                HTTP POST /transcribe ────┘ (from other services)
+CLI (voiced toggle) → Unix Socket → Daemon
+                                     ├── Recorder (sounddevice)
+                                     ├── Transcriber (faster-whisper)
+                                     ├── Injector (wl-clipboard)
+                                     └── Tray Icon (D-Bus SNI)
 ```
 
-**Headless server mode** (`sttd server`):
+**Desktop + HTTP mode** (`voiced start --http`):
+```
+CLI (voiced toggle) → Unix Socket → Daemon
+                                     ├── Recorder (sounddevice)
+                                     ├── Transcriber (faster-whisper) ←─┐
+                                     ├── Synthesizer (VibeVoice) ←──────┤ shared
+                                     ├── Injector (wl-clipboard)        │
+                                     ├── Tray Icon (D-Bus SNI)          │
+                                     └── HTTP Server ───────────────────┘
+                                           ↑
+                 HTTP /transcribe, /synthesize ─┘ (from other services)
+```
+
+**Headless server mode** (`voiced server`):
 ```
 HTTP POST /transcribe → HTTP Server → Transcriber
+HTTP POST /synthesize → HTTP Server → Synthesizer
 ```
 
-**Remote client mode** (`sttd client`):
+**Remote client mode** (`voiced client`):
 ```
 Client Machine                       Server Machine (GPU)
 ─────────────────                    ────────────────────
-sttd client                          sttd server / sttd start --http
+voiced client                        voiced server / voiced start --http
   ├── Recorder ──── WAV ──── HTTP POST /transcribe ────→ Transcriber
   ├── Tray Icon                                              │
   └── Injector ←──── text ←───────────────────────────────────
@@ -357,9 +431,9 @@ sttd client                          sttd server / sttd start --http
 
 **File transcription with diarization:**
 ```
-CLI (sttd transcribe/record --annotate) → Transcriber → SpeakerDiarizer
-                                                          └── SpeechBrain ECAPA-TDNN
-                                                          └── Spectral Clustering
+CLI (voiced transcribe/record --annotate) → Transcriber → SpeakerDiarizer
+                                                           └── SpeechBrain ECAPA-TDNN
+                                                           └── Spectral Clustering
 ```
 
 ## License

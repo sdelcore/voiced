@@ -5,7 +5,7 @@ import logging
 import socket
 from pathlib import Path
 
-from sttd.config import get_socket_path
+from voiced.config import get_socket_path
 
 logger = logging.getLogger(__name__)
 

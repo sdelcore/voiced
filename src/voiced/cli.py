@@ -1,4 +1,4 @@
-"""Command-line interface for sttd."""
+"""Command-line interface for voiced."""
 
 import logging
 import re
@@ -7,9 +7,9 @@ from pathlib import Path
 
 import click
 
-from sttd import __version__
-from sttd.client import ClientError, DaemonNotRunning
-from sttd.config import get_config_path, load_config, save_default_config
+from voiced import __version__
+from voiced.client import ClientError, DaemonNotRunning
+from voiced.config import get_config_path, load_config, save_default_config
 
 
 def setup_logging(verbose: bool = False) -> None:
@@ -32,14 +32,26 @@ def format_srt_timestamp(seconds: float) -> str:
 
 
 @click.group()
-@click.version_option(__version__, prog_name="sttd")
+@click.version_option(__version__, prog_name="voiced")
 @click.option("-v", "--verbose", is_flag=True, help="Enable verbose logging")
 @click.pass_context
 def main(ctx: click.Context, verbose: bool) -> None:
-    """sttd - Speech-to-Text Daemon.
+    """voiced - Voice Daemon for STT and TTS.
 
-    A CLI application for speech-to-text transcription using faster-whisper.
-    Designed for Hyprland with hotkey support.
+    A CLI application for speech-to-text (STT) and text-to-speech (TTS).
+    Uses faster-whisper for STT and VibeVoice for TTS.
+    Designed for Hyprland/Wayland with hotkey support.
+
+    \b
+    STT Commands:
+      voiced start          Start the daemon for hotkey recording
+      voiced toggle         Toggle recording on/off
+      voiced transcribe     Transcribe an audio file
+
+    \b
+    TTS Commands:
+      voiced speak          Synthesize speech from text
+      voiced voices         Manage TTS voice presets
     """
     ctx.ensure_object(dict)
     ctx.obj["verbose"] = verbose
@@ -61,22 +73,22 @@ def start(
     http_port: int | None,
     no_vad: bool,
 ) -> None:
-    """Start the sttd daemon.
+    """Start the voiced daemon.
 
     The daemon provides hotkey-triggered recording with tray icon.
     Use --http to also enable the HTTP transcription API.
 
     Examples:
 
-        sttd start                      # Desktop mode only
+        voiced start                      # Desktop mode only
 
-        sttd start --http               # Desktop + HTTP API
+        voiced start --http               # Desktop + HTTP API
 
-        sttd start --http --http-host 0.0.0.0  # Accept remote connections
+        voiced start --http --http-host 0.0.0.0  # Accept remote connections
 
-        sttd start -d                   # Run in background
+        voiced start -d                   # Run in background
     """
-    from sttd.daemon import Daemon, daemonize, is_daemon_running
+    from voiced.daemon import Daemon, daemonize, is_daemon_running
 
     if is_daemon_running():
         click.echo("Daemon is already running", err=True)
@@ -91,7 +103,7 @@ def start(
     # Determine effective HTTP settings
     http_enabled = http or config.daemon.http_enabled
 
-    click.echo(f"Starting sttd daemon (model: {config.transcription.model})")
+    click.echo(f"Starting voiced daemon (model: {config.transcription.model})")
     if http_enabled:
         effective_host = http_host or config.daemon.http_host or config.server.host
         effective_port = http_port or config.daemon.http_port or config.server.port
@@ -132,18 +144,18 @@ def server(
 
     Examples:
 
-        sttd server                     # Local only
+        voiced server                     # Local only
 
-        sttd server --host 0.0.0.0      # Network accessible
+        voiced server --host 0.0.0.0      # Network accessible
 
-        sttd server --port 9000         # Custom port
+        voiced server --port 9000         # Custom port
 
-        sttd server -d                  # Run in background
+        voiced server -d                  # Run in background
     """
     import signal
 
-    from sttd.daemon import daemonize
-    from sttd.http_server import TranscriptionServer
+    from voiced.daemon import daemonize
+    from voiced.http_server import TranscriptionServer
 
     config = load_config()
 
@@ -196,15 +208,15 @@ def client_cmd(
 
     Examples:
 
-        sttd client --server http://192.168.1.100:8765
+        voiced client --server http://192.168.1.100:8765
 
-        sttd client -d                  # Run in background
+        voiced client -d                  # Run in background
 
-        STTD_SERVER_URL=http://server:8765 sttd client
+        STTD_SERVER_URL=http://server:8765 voiced client
     """
-    from sttd.config import get_server_url
-    from sttd.daemon import daemonize
-    from sttd.remote_daemon import RemoteDaemon, is_client_running
+    from voiced.config import get_server_url
+    from voiced.daemon import daemonize
+    from voiced.remote_daemon import RemoteDaemon, is_client_running
 
     if is_client_running():
         click.echo("Client is already running", err=True)
@@ -236,8 +248,8 @@ def client_cmd(
 
 @main.command()
 def stop() -> None:
-    """Stop the sttd daemon."""
-    from sttd import client
+    """Stop the voiced daemon."""
+    from voiced import client
 
     try:
         response = client.stop_daemon()
@@ -260,9 +272,9 @@ def toggle() -> None:
 
     This is the command to bind to a hotkey in Hyprland:
 
-        bind = SUPER, R, exec, sttd toggle
+        bind = SUPER, R, exec, voiced toggle
     """
-    from sttd import client
+    from voiced import client
 
     try:
         response = client.toggle_recording()
@@ -275,7 +287,7 @@ def toggle() -> None:
             click.echo(f"Error: {response.get('message', 'Unknown error')}", err=True)
             sys.exit(1)
     except DaemonNotRunning:
-        click.echo("Daemon is not running. Start it with: sttd start", err=True)
+        click.echo("Daemon is not running. Start it with: voiced start", err=True)
         sys.exit(1)
     except ClientError as e:
         click.echo(f"Error: {e}", err=True)
@@ -285,7 +297,7 @@ def toggle() -> None:
 @main.command()
 def status() -> None:
     """Show daemon status."""
-    from sttd import client
+    from voiced import client
 
     try:
         response = client.get_status()
@@ -328,19 +340,19 @@ def transcribe(
 
     Examples:
 
-        sttd transcribe audio.wav
+        voiced transcribe audio.wav
 
-        sttd transcribe audio.mp3 -o transcript.txt
+        voiced transcribe audio.mp3 -o transcript.txt
 
-        sttd transcribe audio.wav --model large-v3 --device cuda
+        voiced transcribe audio.wav --model large-v3 --device cuda
 
-        sttd transcribe meeting.wav --annotate
+        voiced transcribe meeting.wav --annotate
 
-        sttd transcribe meeting.wav --annotate --num-speakers 3
+        voiced transcribe meeting.wav --annotate --num-speakers 3
 
-        sttd transcribe audio.wav --server http://192.168.1.100:8765
+        voiced transcribe audio.wav --server http://192.168.1.100:8765
 
-        sttd transcribe meeting.wav --annotate --server http://server:8765
+        voiced transcribe meeting.wav --annotate --server http://server:8765
     """
     config = load_config()
 
@@ -381,7 +393,7 @@ def _transcribe_remote(
     """Transcribe using remote HTTP server."""
     import soundfile as sf
 
-    from sttd.http_client import (
+    from voiced.http_client import (
         HttpConnectionError,
         HttpTimeoutError,
         ServerError,
@@ -446,16 +458,16 @@ def _transcribe_local(
     num_speakers: int | None,
 ) -> None:
     """Transcribe using local model."""
-    from sttd.transcriber import Transcriber
+    from voiced.transcriber import Transcriber
 
     transcriber = Transcriber(config.transcription, vad_config=config.vad)
 
     if annotate:
-        from sttd.diarizer import (
+        from voiced.diarizer import (
             SpeakerDiarizer,
             align_transcription_with_diarization,
         )
-        from sttd.profiles import ProfileManager
+        from voiced.profiles import ProfileManager
 
         click.echo("Running speaker diarization...", err=True)
 
@@ -530,22 +542,22 @@ def record(
 
     Examples:
 
-        sttd record
+        voiced record
 
-        sttd record -o transcript.txt
+        voiced record -o transcript.txt
 
-        sttd record --annotate
+        voiced record --annotate
 
-        sttd record --annotate --num-speakers 2
+        voiced record --annotate --num-speakers 2
 
-        sttd record --model large-v3 --device cuda
+        voiced record --model large-v3 --device cuda
     """
     import signal
     import tempfile
     import time
 
-    from sttd.recorder import Recorder
-    from sttd.transcriber import Transcriber
+    from voiced.recorder import Recorder
+    from voiced.transcriber import Transcriber
 
     config = load_config()
 
@@ -603,11 +615,11 @@ def record(
         if annotate:
             import soundfile as sf
 
-            from sttd.diarizer import (
+            from voiced.diarizer import (
                 SpeakerDiarizer,
                 align_transcription_with_diarization,
             )
-            from sttd.profiles import ProfileManager
+            from voiced.profiles import ProfileManager
 
             click.echo("Running speaker diarization...", err=True)
 
@@ -687,7 +699,7 @@ def record(
 def config(show: bool, init: bool, model: str | None, device: str | None) -> None:
     """Show or modify configuration.
 
-    Configuration file location: ~/.config/sttd/config.toml
+    Configuration file location: ~/.config/voiced/config.toml
     """
     config_path = get_config_path()
 
@@ -745,7 +757,7 @@ def config(show: bool, init: bool, model: str | None, device: str | None) -> Non
         click.echo(f"  device: {cfg.transcription.device}")
         click.echo(f"  language: {cfg.transcription.language}")
         click.echo(f"  beep_enabled: {cfg.audio.beep_enabled}")
-        click.echo("\nRun 'sttd config --init' to create a config file.")
+        click.echo("\nRun 'voiced config --init' to create a config file.")
 
 
 @main.command()
@@ -787,16 +799,15 @@ def register(
 
     Examples:
 
-        sttd register alice -f alice_sample.wav
+        voiced register alice -f alice_sample.wav
 
-        sttd register bob --record --duration 15
+        voiced register bob --record --duration 15
 
-        sttd register alice -f new_sample.wav --force
+        voiced register alice -f new_sample.wav --force
 
-        sttd register alice -f alice_sample.wav --server http://192.168.1.100:8765
+        voiced register alice -f alice_sample.wav --server http://192.168.1.100:8765
     """
     import time
-    from datetime import datetime
 
     config = load_config()
 
@@ -809,7 +820,7 @@ def register(
 
     # For remote registration, we don't check local profile existence
     if not server_url:
-        from sttd.profiles import ProfileManager
+        from voiced.profiles import ProfileManager
 
         pm = ProfileManager()
         if pm.exists(name) and not force:
@@ -819,8 +830,8 @@ def register(
             sys.exit(1)
 
     if record:
-        from sttd.diarizer import ENROLLMENT_PROMPT
-        from sttd.recorder import Recorder
+        from voiced.diarizer import ENROLLMENT_PROMPT
+        from voiced.recorder import Recorder
 
         click.echo("Please read aloud:")
         click.echo(f'"{ENROLLMENT_PROMPT}"')
@@ -878,7 +889,7 @@ def _register_remote(name: str, audio_file: Path, server_url: str, timeout: floa
     """Register a voice profile on a remote server."""
     import soundfile as sf
 
-    from sttd.http_client import (
+    from voiced.http_client import (
         HttpConnectionError,
         ServerError,
         TranscriptionClient,
@@ -918,8 +929,8 @@ def _register_local(
     """Register a voice profile locally."""
     from datetime import datetime
 
-    from sttd.diarizer import SpeakerEmbedder
-    from sttd.profiles import ProfileManager, VoiceProfile
+    from voiced.diarizer import SpeakerEmbedder
+    from voiced.profiles import ProfileManager, VoiceProfile
 
     click.echo(f"Extracting voice embedding from: {audio_file}", err=True)
 
@@ -953,15 +964,15 @@ def profiles(ctx: click.Context) -> None:
 
     Examples:
 
-        sttd profiles                    # List local profiles
+        voiced profiles                    # List local profiles
 
-        sttd profiles list               # List local profiles
+        voiced profiles list               # List local profiles
 
-        sttd profiles list --server URL  # List remote profiles
+        voiced profiles list --server URL  # List remote profiles
 
-        sttd profiles show alice         # Show profile details
+        voiced profiles show alice         # Show profile details
 
-        sttd profiles delete alice       # Delete a profile
+        voiced profiles delete alice       # Delete a profile
     """
     # If no subcommand is invoked, default to listing profiles
     if ctx.invoked_subcommand is None:
@@ -981,13 +992,13 @@ def profiles_list(server_url: str | None, timeout: float = 10.0) -> None:
 
 def _list_profiles_local() -> None:
     """List local voice profiles."""
-    from sttd.profiles import ProfileManager
+    from voiced.profiles import ProfileManager
 
     pm = ProfileManager()
     profile_list = pm.load_all()
 
     if not profile_list:
-        click.echo("No profiles registered. Use 'sttd register' to create one.")
+        click.echo("No profiles registered. Use 'voiced register' to create one.")
         return
 
     click.echo("Registered voice profiles:\n")
@@ -999,7 +1010,7 @@ def _list_profiles_local() -> None:
 
 def _list_profiles_remote(server_url: str, timeout: float) -> None:
     """List remote voice profiles."""
-    from sttd.http_client import (
+    from voiced.http_client import (
         HttpConnectionError,
         ServerError,
         TranscriptionClient,
@@ -1045,7 +1056,7 @@ def profiles_show(name: str, server_url: str | None, timeout: float) -> None:
 
 def _show_profile_local(name: str) -> None:
     """Show local voice profile details."""
-    from sttd.profiles import ProfileManager
+    from voiced.profiles import ProfileManager
 
     pm = ProfileManager()
     profile = pm.load(name)
@@ -1063,7 +1074,7 @@ def _show_profile_local(name: str) -> None:
 
 def _show_profile_remote(name: str, server_url: str, timeout: float) -> None:
     """Show remote voice profile details."""
-    from sttd.http_client import (
+    from voiced.http_client import (
         HttpConnectionError,
         ServerError,
         TranscriptionClient,
@@ -1115,7 +1126,7 @@ def profiles_delete(name: str, server_url: str | None, force: bool, timeout: flo
 
 def _delete_profile_local(name: str) -> None:
     """Delete local voice profile."""
-    from sttd.profiles import ProfileManager
+    from voiced.profiles import ProfileManager
 
     pm = ProfileManager()
     if pm.delete(name):
@@ -1127,7 +1138,7 @@ def _delete_profile_local(name: str) -> None:
 
 def _delete_profile_remote(name: str, server_url: str, timeout: float) -> None:
     """Delete remote voice profile."""
-    from sttd.http_client import (
+    from voiced.http_client import (
         HttpConnectionError,
         ServerError,
         TranscriptionClient,
@@ -1153,7 +1164,7 @@ def _delete_profile_remote(name: str, server_url: str, timeout: float) -> None:
 @main.command()
 def devices() -> None:
     """List available audio input devices."""
-    from sttd.recorder import Recorder
+    from voiced.recorder import Recorder
 
     recorder = Recorder()
     devices = recorder.get_devices()
@@ -1166,6 +1177,333 @@ def devices() -> None:
     for device in devices:
         click.echo(f"  [{device['index']}] {device['name']}")
         click.echo(f"      Channels: {device['channels']}, Sample rate: {device['sample_rate']}")
+
+
+# =============================================================================
+# TTS Commands
+# =============================================================================
+
+
+@main.command()
+@click.argument("text", required=False)
+@click.option("--stream", is_flag=True, help="Use low-latency streaming playback")
+@click.option("--clipboard", is_flag=True, help="Speak text from clipboard")
+@click.option("--stdin", is_flag=True, help="Read text from stdin")
+@click.option(
+    "-o", "--save", "output_file", type=click.Path(path_type=Path), help="Save audio to file"
+)
+@click.option("-v", "--voice", default=None, help="Voice preset (default: from config)")
+@click.option("--server", "server_url", default=None, help="Server URL for remote TTS")
+@click.option("--timeout", type=float, default=60.0, help="Request timeout in seconds")
+@click.option("--cfg-scale", type=float, default=None, help="Classifier-free guidance scale")
+@click.pass_context
+def speak(
+    ctx: click.Context,
+    text: str | None,
+    stream: bool,
+    clipboard: bool,
+    stdin: bool,
+    output_file: Path | None,
+    voice: str | None,
+    server_url: str | None,
+    timeout: float,
+    cfg_scale: float | None,
+) -> None:
+    """Synthesize speech from text.
+
+    Examples:
+
+        voiced speak "Hello world"
+
+        voiced speak --stream "Low latency streaming"
+
+        voiced speak --clipboard                    # Speak clipboard contents
+
+        echo "Hello" | voiced speak --stdin
+
+        voiced speak "Save this" -o output.wav
+
+        voiced speak "Hello" --voice mike
+
+        voiced speak "Hello" --server http://192.168.1.100:8765
+    """
+    # Determine input source
+    sources = [text is not None, clipboard, stdin]
+    if sum(sources) > 1:
+        click.echo("Error: Use only one input source (text, --clipboard, or --stdin)", err=True)
+        sys.exit(1)
+
+    if not any(sources):
+        click.echo("Error: Provide text, --clipboard, or --stdin", err=True)
+        sys.exit(1)
+
+    # Get text from source
+    if clipboard:
+        import subprocess
+
+        try:
+            result = subprocess.run(
+                ["wl-paste", "--no-newline"],
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            text = result.stdout
+        except FileNotFoundError:
+            click.echo("Error: wl-paste not found (install wl-clipboard)", err=True)
+            sys.exit(1)
+        except subprocess.CalledProcessError as e:
+            click.echo(f"Error reading clipboard: {e}", err=True)
+            sys.exit(1)
+
+    elif stdin:
+        text = sys.stdin.read()
+
+    if not text or not text.strip():
+        click.echo("Error: No text to speak", err=True)
+        sys.exit(1)
+
+    text = text.strip()
+    config = load_config()
+
+    if not config.tts.enabled:
+        click.echo("Error: TTS is disabled in config", err=True)
+        sys.exit(1)
+
+    # Use server if URL provided
+    if server_url:
+        _speak_remote(text, server_url, voice, output_file, stream, timeout, cfg_scale)
+    else:
+        _speak_local(text, config, voice, output_file, stream, cfg_scale)
+
+
+def _speak_local(
+    text: str,
+    config,
+    voice: str | None,
+    output_file: Path | None,
+    stream: bool,
+    cfg_scale: float | None,
+) -> None:
+    """Synthesize speech locally using VibeVoice."""
+    from voiced.synthesizer import Synthesizer, TTSConfig, check_vibevoice_installed
+
+    if not check_vibevoice_installed():
+        click.echo(
+            "Error: VibeVoice is not installed. Install it with:\n"
+            "  pip install git+https://github.com/microsoft/VibeVoice.git",
+            err=True,
+        )
+        sys.exit(1)
+
+    # Create TTSConfig from app config
+    tts_config = TTSConfig(
+        model_path=config.tts.model,
+        device=config.tts.device,
+        default_voice=voice or config.tts.default_voice,
+        cfg_scale=cfg_scale if cfg_scale is not None else config.tts.cfg_scale,
+        unload_timeout_seconds=config.tts.unload_timeout_minutes * 60,
+    )
+
+    synthesizer = Synthesizer(tts_config)
+
+    try:
+        if stream and not output_file:
+            # Streaming playback
+            from voiced.tts_streamer import StreamingAudioPlayer
+
+            click.echo(f"Streaming: {text[:50]}{'...' if len(text) > 50 else ''}", err=True)
+
+            player = StreamingAudioPlayer(sample_rate=synthesizer.sample_rate)
+            player.start()
+
+            try:
+                for chunk in synthesizer.synthesize_streaming(
+                    text, voice=voice, cfg_scale=cfg_scale
+                ):
+                    player.write(chunk)
+                player.finish()
+                player.wait()
+            except KeyboardInterrupt:
+                player.stop()
+                click.echo("\nPlayback interrupted", err=True)
+        else:
+            # Batch synthesis
+            click.echo(f"Synthesizing: {text[:50]}{'...' if len(text) > 50 else ''}", err=True)
+            audio = synthesizer.synthesize(text, voice=voice, cfg_scale=cfg_scale)
+
+            if output_file:
+                # Save to file
+                import soundfile as sf
+
+                sf.write(str(output_file), audio, synthesizer.sample_rate)
+                click.echo(f"Saved to: {output_file}", err=True)
+            else:
+                # Play audio
+                from voiced.tts_streamer import play_audio
+
+                play_audio(audio, synthesizer.sample_rate)
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    finally:
+        synthesizer.shutdown()
+
+
+def _speak_remote(
+    text: str,
+    server_url: str,
+    voice: str | None,
+    output_file: Path | None,
+    stream: bool,
+    timeout: float,
+    cfg_scale: float | None,
+) -> None:
+    """Synthesize speech using remote server."""
+    click.echo(f"Using remote server: {server_url}", err=True)
+    click.echo(f"Synthesizing: {text[:50]}{'...' if len(text) > 50 else ''}", err=True)
+
+    # TODO: Implement HTTP client for TTS
+    # For now, show a placeholder message
+    click.echo("Error: Remote TTS not yet implemented", err=True)
+    sys.exit(1)
+
+
+# Voice management command group
+@main.group(invoke_without_command=True)
+@click.pass_context
+def voices(ctx: click.Context) -> None:
+    """Manage TTS voice presets.
+
+    When called without a subcommand, lists available voices.
+
+    Examples:
+
+        voiced voices                    # List all voices
+
+        voiced voices list               # List all voices
+
+        voiced voices download emma      # Download voice preset
+
+        voiced voices remove emma        # Remove cached voice
+    """
+    if ctx.invoked_subcommand is None:
+        ctx.invoke(voices_list)
+
+
+@voices.command("list")
+def voices_list() -> None:
+    """List available TTS voice presets."""
+    from voiced.voice_manager import VoiceManager
+
+    vm = VoiceManager()
+    available = vm.list_available()
+    downloaded = set(vm.list_downloaded())
+
+    click.echo("Available voice presets:\n")
+    for name in available:
+        status = "[downloaded]" if name in downloaded else "[not downloaded]"
+        click.echo(f"  {name:10} {status}")
+
+    if downloaded:
+        click.echo(f"\n{len(downloaded)} voice(s) cached locally")
+
+
+@voices.command("download")
+@click.argument("name")
+@click.option("--force", is_flag=True, help="Re-download even if cached")
+def voices_download(name: str, force: bool) -> None:
+    """Download a voice preset.
+
+    Examples:
+
+        voiced voices download emma
+
+        voiced voices download mike --force
+    """
+    from voiced.voice_manager import VoiceManager
+
+    vm = VoiceManager()
+
+    try:
+        click.echo(f"Downloading voice preset: {name}")
+        path = vm.download(name, force=force)
+        click.echo(f"Downloaded to: {path}")
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    except Exception as e:
+        click.echo(f"Error downloading voice: {e}", err=True)
+        sys.exit(1)
+
+
+@voices.command("remove")
+@click.argument("name")
+@click.option("--force", is_flag=True, help="Skip confirmation")
+def voices_remove(name: str, force: bool) -> None:
+    """Remove a cached voice preset.
+
+    Examples:
+
+        voiced voices remove emma
+
+        voiced voices remove mike --force
+    """
+    from voiced.voice_manager import VoiceManager
+
+    vm = VoiceManager()
+
+    try:
+        info = vm.get_voice_info(name)
+        if not info.get("downloaded"):
+            click.echo(f"Voice '{name}' is not downloaded", err=True)
+            sys.exit(1)
+
+        if not force:
+            if not click.confirm(f"Remove voice preset '{name}'?"):
+                click.echo("Cancelled")
+                return
+
+        if vm.remove(name):
+            click.echo(f"Removed voice preset: {name}")
+        else:
+            click.echo(f"Voice '{name}' not found", err=True)
+            sys.exit(1)
+
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@voices.command("info")
+@click.argument("name")
+def voices_info(name: str) -> None:
+    """Show details about a voice preset.
+
+    Examples:
+
+        voiced voices info emma
+    """
+    from voiced.voice_manager import VoiceManager
+
+    vm = VoiceManager()
+
+    try:
+        info = vm.get_voice_info(name)
+
+        click.echo(f"Voice: {info['name']}\n")
+        click.echo(f"  Filename: {info['filename']}")
+        click.echo(f"  Downloaded: {'yes' if info['downloaded'] else 'no'}")
+
+        if info.get("downloaded"):
+            size_mb = info.get("size_bytes", 0) / (1024 * 1024)
+            click.echo(f"  Size: {size_mb:.1f} MB")
+            click.echo(f"  Path: {info.get('path', 'unknown')}")
+
+    except ValueError as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
 
 if __name__ == "__main__":

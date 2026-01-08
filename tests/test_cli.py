@@ -2,7 +2,7 @@
 
 from click.testing import CliRunner
 
-from sttd.cli import main
+from voiced.cli import main
 
 
 class TestCLI:
@@ -13,7 +13,7 @@ class TestCLI:
         runner = CliRunner()
         result = runner.invoke(main, ["--version"])
         assert result.exit_code == 0
-        assert "sttd" in result.output
+        assert "voiced" in result.output
 
     def test_help(self):
         """Test help output."""

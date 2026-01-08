@@ -1,4 +1,4 @@
-"""Daemon process for sttd."""
+"""Daemon process for voiced."""
 
 import logging
 import os
@@ -13,13 +13,13 @@ from queue import Queue
 
 import numpy as np
 
-from sttd import audio
-from sttd.config import Config, get_pid_path, load_config
-from sttd.injector import inject_to_clipboard
-from sttd.recorder import Recorder
-from sttd.server import Server
-from sttd.transcriber import Transcriber
-from sttd.tray import TrayIcon, TrayState
+from voiced import audio
+from voiced.config import Config, get_pid_path, load_config
+from voiced.injector import inject_to_clipboard
+from voiced.recorder import Recorder
+from voiced.server import Server
+from voiced.transcriber import Transcriber
+from voiced.tray import TrayIcon, TrayState
 
 logger = logging.getLogger(__name__)
 
@@ -140,7 +140,7 @@ def _get_transcription_server():
     """Lazy load TranscriptionServer to avoid import overhead."""
     global TranscriptionServer
     if TranscriptionServer is None:
-        from sttd.http_server import TranscriptionServer
+        from voiced.http_server import TranscriptionServer
 
     return TranscriptionServer
 

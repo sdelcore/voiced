@@ -1,4 +1,4 @@
-"""Configuration management for sttd."""
+"""Configuration management for voiced."""
 
 import os
 from dataclasses import dataclass, field
@@ -55,6 +55,18 @@ class DiarizationConfig:
 
 
 @dataclass
+class TTSConfig:
+    """Text-to-Speech settings."""
+
+    enabled: bool = True
+    model: str = "microsoft/VibeVoice-Realtime-0.5B"
+    device: str = "auto"  # auto, cuda, mps, cpu
+    default_voice: str = "emma"
+    cfg_scale: float = 1.5  # Classifier-free guidance scale
+    unload_timeout_minutes: int = 60  # Auto-unload model after inactivity (0 = never)
+
+
+@dataclass
 class DaemonConfig:
     """Daemon settings."""
 
@@ -87,6 +99,7 @@ class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     vad: VadConfig = field(default_factory=VadConfig)
     diarization: DiarizationConfig = field(default_factory=DiarizationConfig)
+    tts: TTSConfig = field(default_factory=TTSConfig)
     daemon: DaemonConfig = field(default_factory=DaemonConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     client: ClientConfig = field(default_factory=ClientConfig)
@@ -95,13 +108,13 @@ class Config:
 def get_config_path() -> Path:
     """Get the path to the configuration file."""
     xdg_config = os.environ.get("XDG_CONFIG_HOME", os.path.expanduser("~/.config"))
-    return Path(xdg_config) / "sttd" / "config.toml"
+    return Path(xdg_config) / "voiced" / "config.toml"
 
 
 def get_cache_dir() -> Path:
-    """Get the cache directory for sttd."""
+    """Get the cache directory for voiced."""
     xdg_cache = os.environ.get("XDG_CACHE_HOME", os.path.expanduser("~/.cache"))
-    cache_dir = Path(xdg_cache) / "sttd"
+    cache_dir = Path(xdg_cache) / "voiced"
     cache_dir.mkdir(parents=True, exist_ok=True)
     return cache_dir
 
@@ -177,6 +190,11 @@ def load_config() -> Config:
             if hasattr(config.server, key):
                 setattr(config.server, key, value)
 
+    if "tts" in data:
+        for key, value in data["tts"].items():
+            if hasattr(config.tts, key):
+                setattr(config.tts, key, value)
+
     if "client" in data:
         for key, value in data["client"].items():
             if hasattr(config.client, key):
@@ -231,6 +249,14 @@ min_segment_duration = 0.5  # Minimum segment length for embedding (seconds)
 # num_speakers = 2       # Set if known, leave unset for auto-detect
 # clustering_threshold = 0.7  # Clustering threshold when num_speakers is None
 # profiles_path = "/path/to/profiles"  # Custom profiles directory
+
+[tts]
+enabled = true           # Enable TTS (requires VibeVoice)
+model = "microsoft/VibeVoice-Realtime-0.5B"
+device = "auto"          # auto, cuda, mps, cpu
+default_voice = "emma"   # carter, davis, emma, frank, grace, mike
+cfg_scale = 1.5          # Classifier-free guidance scale
+unload_timeout_minutes = 60  # Auto-unload after inactivity (0 = never)
 
 [daemon]
 http_enabled = false     # Start HTTP server alongside Unix socket

@@ -7,7 +7,7 @@ from pathlib import Path
 import numpy as np
 from faster_whisper import WhisperModel
 
-from sttd.config import TranscriptionConfig, VadConfig
+from voiced.config import TranscriptionConfig, VadConfig
 
 logger = logging.getLogger(__name__)
 

@@ -1,4 +1,4 @@
-"""HTTP server for transcription requests."""
+"""HTTP server for transcription and TTS requests."""
 
 import io
 import json
@@ -10,15 +10,14 @@ import time
 import wave
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
-from sttd.config import Config, load_config
-from sttd.diarizer import SpeakerIdentifier
-from sttd.profiles import ProfileManager, VoiceProfile
-from sttd.transcriber import Transcriber
+from voiced.config import Config, load_config
+from voiced.diarizer import SpeakerIdentifier
+from voiced.profiles import ProfileManager, VoiceProfile
+from voiced.transcriber import Transcriber
 
 logger = logging.getLogger(__name__)
 
@@ -50,17 +49,21 @@ def wav_to_audio(wav_bytes: bytes) -> tuple[np.ndarray, int]:
 
 
 class TranscriptionHandler(BaseHTTPRequestHandler):
-    """Handle transcription HTTP requests."""
+    """Handle transcription and TTS HTTP requests."""
 
     transcriber: Transcriber
     config: Config
     start_time: float
     request_count: int = 0
+    tts_request_count: int = 0
     protocol_version = "HTTP/1.1"
 
     # Lazy-loaded speaker identifier (class attribute for sharing across requests)
     _speaker_identifier: SpeakerIdentifier | None = None
     _profile_manager: ProfileManager | None = None
+
+    # TTS synthesizer (lazy-loaded, shared across requests)
+    _synthesizer = None
 
     def log_message(self, format: str, *args) -> None:
         logger.info("%s - %s", self.address_string(), format % args)
@@ -115,6 +118,14 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
                 self._handle_get_profile(name)
             else:
                 self._send_error_json(404, "Not found", "NOT_FOUND")
+        elif path == "/voices":
+            self._handle_list_voices()
+        elif path.startswith("/voices/"):
+            name = self._parse_voice_name(path)
+            if name:
+                self._handle_get_voice(name)
+            else:
+                self._send_error_json(404, "Not found", "NOT_FOUND")
         else:
             self._send_error_json(404, "Not found", "NOT_FOUND")
 
@@ -124,10 +135,18 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
 
         if path == "/transcribe":
             self._handle_transcribe(parsed.query)
+        elif path == "/synthesize":
+            self._handle_synthesize(parsed.query)
         elif path.startswith("/profiles/"):
             name = self._parse_profile_name(path)
             if name:
                 self._handle_create_profile(name)
+            else:
+                self._send_error_json(404, "Not found", "NOT_FOUND")
+        elif path.startswith("/voices/") and path.endswith("/download"):
+            name = self._parse_voice_download_name(path)
+            if name:
+                self._handle_download_voice(name)
             else:
                 self._send_error_json(404, "Not found", "NOT_FOUND")
         else:
@@ -160,18 +179,27 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
     def _handle_status(self) -> None:
         device = self.transcriber._get_device()
         uptime = time.time() - self.start_time
-        self._send_json(
-            200,
-            {
-                "status": "ok",
-                "state": "idle",
-                "model": self.transcriber.config.model,
-                "device": device,
-                "language": self.transcriber.config.language,
-                "request_count": TranscriptionHandler.request_count,
-                "uptime_seconds": round(uptime, 1),
+
+        status_data = {
+            "status": "ok",
+            "state": "idle",
+            "model": self.transcriber.config.model,
+            "device": device,
+            "language": self.transcriber.config.language,
+            "request_count": TranscriptionHandler.request_count,
+            "uptime_seconds": round(uptime, 1),
+            "tts": {
+                "enabled": self.config.tts.enabled,
+                "model_loaded": (
+                    TranscriptionHandler._synthesizer is not None
+                    and TranscriptionHandler._synthesizer.is_loaded
+                ),
+                "request_count": TranscriptionHandler.tts_request_count,
+                "default_voice": self.config.tts.default_voice,
             },
-        )
+        }
+
+        self._send_json(200, status_data)
 
     def _handle_transcribe(self, query_string: str) -> None:
         content_length = int(self.headers.get("Content-Length", 0))
@@ -460,7 +488,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         logger.info(f"Creating profile '{name}' from {duration:.1f}s of audio")
 
         try:
-            from sttd.diarizer import SpeakerEmbedder
+            from voiced.diarizer import SpeakerEmbedder
 
             # Get or create embedder
             identifier = self._get_speaker_identifier()
@@ -512,6 +540,200 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.exception(f"Failed to delete profile: {e}")
             self._send_error_json(500, f"Failed to delete profile: {e}", "PROFILE_ERROR")
+
+    # =========================================================================
+    # TTS Endpoints
+    # =========================================================================
+
+    def _parse_voice_name(self, path: str) -> str | None:
+        """Parse voice name from /voices/{name} path."""
+        match = re.match(r"^/voices/([^/]+)$", path)
+        if match:
+            return match.group(1)
+        return None
+
+    def _parse_voice_download_name(self, path: str) -> str | None:
+        """Parse voice name from /voices/{name}/download path."""
+        match = re.match(r"^/voices/([^/]+)/download$", path)
+        if match:
+            return match.group(1)
+        return None
+
+    def _get_synthesizer(self):
+        """Get or create TTS synthesizer (lazy-loaded)."""
+        if TranscriptionHandler._synthesizer is None:
+            if not self.config.tts.enabled:
+                return None
+
+            from voiced.synthesizer import Synthesizer, TTSConfig, check_vibevoice_installed
+
+            if not check_vibevoice_installed():
+                logger.warning("VibeVoice is not installed, TTS endpoints will be unavailable")
+                return None
+
+            tts_config = TTSConfig(
+                model_path=self.config.tts.model,
+                device=self.config.tts.device,
+                default_voice=self.config.tts.default_voice,
+                cfg_scale=self.config.tts.cfg_scale,
+                unload_timeout_seconds=self.config.tts.unload_timeout_minutes * 60,
+            )
+            TranscriptionHandler._synthesizer = Synthesizer(tts_config)
+
+        return TranscriptionHandler._synthesizer
+
+    def _handle_list_voices(self) -> None:
+        """Handle GET /voices - list available voice presets."""
+        try:
+            from voiced.voice_manager import VoiceManager
+
+            vm = VoiceManager()
+            available = vm.list_available()
+            downloaded = set(vm.list_downloaded())
+
+            voices_data = []
+            for name in available:
+                info = vm.get_voice_info(name)
+                voices_data.append(
+                    {
+                        "name": name,
+                        "downloaded": name in downloaded,
+                        "filename": info.get("filename"),
+                        "size_bytes": info.get("size_bytes") if info.get("downloaded") else None,
+                    }
+                )
+
+            self._send_json(200, {"voices": voices_data})
+        except Exception as e:
+            logger.exception(f"Failed to list voices: {e}")
+            self._send_error_json(500, f"Failed to list voices: {e}", "VOICE_ERROR")
+
+    def _handle_get_voice(self, name: str) -> None:
+        """Handle GET /voices/{name} - get voice info."""
+        try:
+            from voiced.voice_manager import VoiceManager
+
+            vm = VoiceManager()
+
+            try:
+                info = vm.get_voice_info(name)
+            except ValueError as e:
+                self._send_error_json(404, str(e), "VOICE_NOT_FOUND")
+                return
+
+            self._send_json(200, info)
+        except Exception as e:
+            logger.exception(f"Failed to get voice info: {e}")
+            self._send_error_json(500, f"Failed to get voice info: {e}", "VOICE_ERROR")
+
+    def _handle_download_voice(self, name: str) -> None:
+        """Handle POST /voices/{name}/download - download voice preset."""
+        try:
+            from voiced.voice_manager import VoiceManager
+
+            vm = VoiceManager()
+
+            logger.info(f"Downloading voice preset: {name}")
+            path = vm.download(name, force=False)
+
+            info = vm.get_voice_info(name)
+            self._send_json(
+                200,
+                {
+                    "status": "downloaded",
+                    "name": name,
+                    "path": str(path),
+                    "size_bytes": info.get("size_bytes"),
+                },
+            )
+        except ValueError as e:
+            self._send_error_json(404, str(e), "VOICE_NOT_FOUND")
+        except Exception as e:
+            logger.exception(f"Failed to download voice: {e}")
+            self._send_error_json(500, f"Failed to download voice: {e}", "VOICE_ERROR")
+
+    def _handle_synthesize(self, query_string: str) -> None:
+        """Handle POST /synthesize - synthesize speech from text."""
+        # Check if TTS is enabled
+        synthesizer = self._get_synthesizer()
+        if synthesizer is None:
+            self._send_error_json(
+                503,
+                "TTS is not available (VibeVoice not installed or TTS disabled)",
+                "TTS_UNAVAILABLE",
+            )
+            return
+
+        # Parse request body
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length == 0:
+            self._send_error_json(400, "No request body", "NO_BODY")
+            return
+
+        if content_length > 1024 * 1024:  # 1MB max for text
+            self._send_error_json(413, "Request body too large (max 1MB)", "BODY_TOO_LARGE")
+            return
+
+        try:
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            self._send_error_json(400, f"Invalid JSON: {e}", "INVALID_JSON")
+            return
+
+        text = data.get("text", "").strip()
+        if not text:
+            self._send_error_json(400, "No text provided", "NO_TEXT")
+            return
+
+        if len(text) > 10000:
+            self._send_error_json(400, "Text too long (max 10000 chars)", "TEXT_TOO_LONG")
+            return
+
+        voice = data.get("voice") or self.config.tts.default_voice
+        cfg_scale = data.get("cfg_scale") or self.config.tts.cfg_scale
+
+        logger.info(f"Synthesizing {len(text)} chars with voice '{voice}'")
+
+        try:
+            start_time = time.time()
+            audio = synthesizer.synthesize(text, voice=voice, cfg_scale=cfg_scale)
+            elapsed = time.time() - start_time
+
+            # Convert to WAV bytes
+            wav_bytes = self._audio_to_wav(audio, synthesizer.sample_rate)
+
+            duration = len(audio) / synthesizer.sample_rate
+            TranscriptionHandler.tts_request_count += 1
+
+            # Send WAV response
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/wav")
+            self.send_header("Content-Length", str(len(wav_bytes)))
+            self.send_header("X-Audio-Duration", str(round(duration, 2)))
+            self.send_header("X-Processing-Time", str(round(elapsed, 2)))
+            self.send_header("X-Voice", voice)
+            self.end_headers()
+            self.wfile.write(wav_bytes)
+
+        except Exception as e:
+            logger.exception(f"TTS synthesis failed: {e}")
+            self._send_error_json(500, f"Synthesis failed: {e}", "SYNTHESIS_ERROR")
+
+    def _audio_to_wav(self, audio: np.ndarray, sample_rate: int) -> bytes:
+        """Convert numpy audio array to WAV bytes."""
+        buffer = io.BytesIO()
+
+        # Convert float32 to int16
+        audio_int16 = (audio * 32767).astype(np.int16)
+
+        with wave.open(buffer, "wb") as wav:
+            wav.setnchannels(1)
+            wav.setsampwidth(2)  # 16-bit
+            wav.setframerate(sample_rate)
+            wav.writeframes(audio_int16.tobytes())
+
+        return buffer.getvalue()
 
 
 class TranscriptionServer:
@@ -599,6 +821,11 @@ class TranscriptionServer:
         if TranscriptionHandler._speaker_identifier is not None:
             TranscriptionHandler._speaker_identifier.unload()
             TranscriptionHandler._speaker_identifier = None
+
+        # Clean up TTS synthesizer if loaded
+        if TranscriptionHandler._synthesizer is not None:
+            TranscriptionHandler._synthesizer.shutdown()
+            TranscriptionHandler._synthesizer = None
 
         self.transcriber.unload()
         logger.info("HTTP server stopped")

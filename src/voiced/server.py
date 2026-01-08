@@ -9,7 +9,7 @@ import threading
 from collections.abc import Callable
 from pathlib import Path
 
-from sttd.config import get_socket_path
+from voiced.config import get_socket_path
 
 logger = logging.getLogger(__name__)
 

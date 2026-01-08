@@ -14,8 +14,8 @@ from scipy.spatial.distance import cosine
 if not hasattr(torchaudio, "list_audio_backends"):
     torchaudio.list_audio_backends = lambda: ["soundfile"]
 
-from sttd.config import DiarizationConfig
-from sttd.profiles import ProfileManager, VoiceProfile
+from voiced.config import DiarizationConfig
+from voiced.profiles import ProfileManager, VoiceProfile
 
 logger = logging.getLogger(__name__)
 

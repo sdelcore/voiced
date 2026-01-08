@@ -1,4 +1,4 @@
-"""System tray icon for sttd using StatusNotifierItem (SNI) via D-Bus.
+"""System tray icon for voiced using StatusNotifierItem (SNI) via D-Bus.
 
 This implementation uses the org.kde.StatusNotifierItem D-Bus interface
 which is supported by waybar and other Wayland-native status bars.
@@ -20,18 +20,26 @@ from dasbus.server.template import InterfaceTemplate
 from dasbus.typing import Bool, Byte, Int, List, ObjPath, Str, Tuple
 from PIL import Image, ImageDraw
 
-from sttd.dbusmenu import DBUSMENU_PATH, DBusMenuImplementation
+from voiced.dbusmenu import DBUSMENU_PATH, DBusMenuImplementation
 
 logger = logging.getLogger(__name__)
 
-# Icon size for the tray
-ICON_SIZE = 22
+# Icon size for the tray (higher res for crispness)
+ICON_SIZE = 24
 
 # D-Bus constants
 SNI_INTERFACE = "org.kde.StatusNotifierItem"
 SNW_INTERFACE = "org.kde.StatusNotifierWatcher"
 SNW_PATH = "/StatusNotifierWatcher"
 SNI_PATH = "/StatusNotifierItem"
+
+# Modern color palette
+COLORS = {
+    "idle": (99, 102, 241, 255),  # Indigo-500
+    "recording": (239, 68, 68, 255),  # Red-500
+    "transcribing": (245, 158, 11, 255),  # Amber-500
+    "success": (34, 197, 94, 255),  # Green-500
+}
 
 
 class TrayState(Enum):
@@ -42,60 +50,158 @@ class TrayState(Enum):
     TRANSCRIBING = "transcribing"
 
 
-def create_icon_pixmap(state: TrayState) -> list:
-    """Create an icon pixmap for the given state.
+def _draw_microphone(draw: ImageDraw.Draw, color: tuple, size: int, stroke: int = 2) -> None:
+    """Draw a Lucide-style microphone icon.
 
-    The pixmap format for StatusNotifierItem is:
-    array of (width, height, image_data) where image_data is ARGB32
+    Based on Lucide's mic icon path structure:
+    - Rounded rectangle for mic body
+    - Arc for the holder/stand
+    - Vertical line for the stand
+
+    Args:
+        draw: PIL ImageDraw object
+        color: RGBA color tuple
+        size: Icon size in pixels
+        stroke: Stroke width
+    """
+    # Scale factor (Lucide icons are 24x24)
+    s = size / 24.0
+
+    # Mic body - rounded rectangle (x=9, y=2, w=6, h=13, rx=3)
+    # In PIL we draw a rounded rectangle
+    mic_left = int(9 * s)
+    mic_top = int(2 * s)
+    mic_right = int(15 * s)
+    mic_bottom = int(15 * s)
+    mic_radius = int(3 * s)
+
+    # Draw mic body outline
+    draw.rounded_rectangle(
+        [(mic_left, mic_top), (mic_right, mic_bottom)],
+        radius=mic_radius,
+        outline=color,
+        width=stroke,
+    )
+
+    # Holder arc - "M19 10v2a7 7 0 0 1-14 0v-2"
+    # This is an arc from (5, 10) to (19, 10) curving down to y=12 with radius 7
+    arc_left = int(5 * s)
+    arc_top = int(5 * s)  # Center at y=12, radius=7, so top = 12-7=5
+    arc_right = int(19 * s)
+    arc_bottom = int(19 * s)  # bottom = 12+7=19
+
+    # Draw the arc (bottom half of ellipse, from 0 to 180 degrees)
+    draw.arc(
+        [(arc_left, arc_top), (arc_right, arc_bottom)],
+        start=0,
+        end=180,
+        fill=color,
+        width=stroke,
+    )
+
+    # Stand line - "M12 19v3" (vertical line from y=19 to y=22)
+    stand_x = int(12 * s)
+    stand_top = int(19 * s)
+    stand_bottom = int(22 * s)
+    draw.line(
+        [(stand_x, stand_top), (stand_x, stand_bottom)],
+        fill=color,
+        width=stroke,
+    )
+
+
+def _draw_recording_indicator(draw: ImageDraw.Draw, size: int) -> None:
+    """Draw a pulsing recording dot indicator.
+
+    Args:
+        draw: PIL ImageDraw object
+        size: Icon size in pixels
+    """
+    # Small red dot in top-right corner
+    dot_radius = int(size * 0.15)
+    dot_x = size - dot_radius - 1
+    dot_y = dot_radius + 1
+
+    # Outer glow
+    glow_color = (239, 68, 68, 100)
+    draw.ellipse(
+        [
+            (dot_x - dot_radius - 2, dot_y - dot_radius - 2),
+            (dot_x + dot_radius + 2, dot_y + dot_radius + 2),
+        ],
+        fill=glow_color,
+    )
+
+    # Inner dot
+    dot_color = (255, 60, 60, 255)
+    draw.ellipse(
+        [
+            (dot_x - dot_radius, dot_y - dot_radius),
+            (dot_x + dot_radius, dot_y + dot_radius),
+        ],
+        fill=dot_color,
+    )
+
+
+def _draw_processing_indicator(draw: ImageDraw.Draw, size: int) -> None:
+    """Draw a subtle processing indicator (dots).
+
+    Args:
+        draw: PIL ImageDraw object
+        size: Icon size in pixels
+    """
+    # Three small dots at the bottom
+    dot_radius = 1
+    dot_y = size - 3
+    dot_color = (245, 158, 11, 200)
+
+    for i, offset in enumerate([-4, 0, 4]):
+        dot_x = size // 2 + offset
+        draw.ellipse(
+            [
+                (dot_x - dot_radius, dot_y - dot_radius),
+                (dot_x + dot_radius, dot_y + dot_radius),
+            ],
+            fill=dot_color,
+        )
+
+
+def create_icon_pixmap(state: TrayState) -> list:
+    """Create a modern icon pixmap for the given state.
+
+    Uses Lucide-style microphone icon design with state-based coloring.
 
     Args:
         state: Current tray state.
 
     Returns:
-        List containing (width, height, bytes) tuple.
+        List containing (width, height, bytes) tuple for StatusNotifierItem.
     """
-    # Create a new image with transparency
+    # Create image with transparency
     image = Image.new("RGBA", (ICON_SIZE, ICON_SIZE), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
 
-    # Colors based on state
+    # Get color based on state
     if state == TrayState.RECORDING:
-        color = (239, 68, 68, 255)  # Red
+        color = COLORS["recording"]
     elif state == TrayState.TRANSCRIBING:
-        color = (234, 179, 8, 255)  # Yellow
+        color = COLORS["transcribing"]
     else:
-        color = (59, 130, 246, 255)  # Blue
+        color = COLORS["idle"]
 
-    # Draw a simple microphone circle icon
-    padding = 2
-    draw.ellipse(
-        [(padding, padding), (ICON_SIZE - padding, ICON_SIZE - padding)],
-        fill=color,
-    )
+    # Draw the microphone
+    _draw_microphone(draw, color, ICON_SIZE, stroke=2)
 
-    # Draw inner detail (mic pattern)
-    inner_padding = 6
-    inner_color = (255, 255, 255, 200)
-    draw.ellipse(
-        [
-            (inner_padding, inner_padding + 2),
-            (ICON_SIZE - inner_padding, ICON_SIZE - inner_padding - 2),
-        ],
-        fill=inner_color,
-    )
-
+    # Add state-specific indicators
     if state == TrayState.RECORDING:
-        dot_size = 6
-        draw.ellipse(
-            [(ICON_SIZE - dot_size - 1, 1), (ICON_SIZE - 1, dot_size + 1)],
-            fill=(255, 0, 0, 255),
-        )
+        _draw_recording_indicator(draw, ICON_SIZE)
+    elif state == TrayState.TRANSCRIBING:
+        _draw_processing_indicator(draw, ICON_SIZE)
 
     # Convert RGBA to ARGB (StatusNotifierItem expects ARGB32 in network byte order)
     pixels = list(image.getdata())
     argb_data = b""
     for r, g, b, a in pixels:
-        # ARGB32 in network byte order (big-endian)
         argb_data += struct.pack(">BBBB", a, r, g, b)
 
     return [(ICON_SIZE, ICON_SIZE, argb_data)]
@@ -245,9 +351,9 @@ class StatusNotifierItem:
         on_quit: Callable[[], None] | None = None,
     ):
         self.category = "ApplicationStatus"
-        self.id = "sttd"
-        self.title = "sttd: idle"
-        self.tooltip = "Speech-to-Text Daemon"
+        self.id = "voiced"
+        self.title = "voiced: idle"
+        self.tooltip = "Voice Daemon - Click to toggle recording"
         self.status = "Active"
         self._state = TrayState.IDLE
         self.icon_pixmap = create_icon_pixmap(TrayState.IDLE)
@@ -275,7 +381,7 @@ class StatusNotifierItem:
     def set_state(self, state: TrayState):
         """Update the tray state and icon."""
         self._state = state
-        self.title = f"sttd: {state.value}"
+        self.title = f"voiced: {state.value}"
         self.icon_pixmap = create_icon_pixmap(state)
 
         if state == TrayState.RECORDING:

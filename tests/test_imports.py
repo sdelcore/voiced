@@ -2,32 +2,32 @@
 
 
 class TestPublicImports:
-    """Verify all public API items are importable from sttd."""
+    """Verify all public API items are importable from voiced."""
 
     def test_import_version(self):
         """Test __version__ is importable."""
-        from sttd import __version__
+        from voiced import __version__
 
         assert isinstance(__version__, str)
-        assert __version__ == "0.1.0"
+        assert __version__ == "0.2.0"
 
     def test_import_transcriber(self):
         """Test Transcriber class is importable."""
-        from sttd import Transcriber, TranscriptionConfig
+        from voiced import Transcriber, TranscriptionConfig
 
         assert Transcriber is not None
         assert TranscriptionConfig is not None
 
     def test_import_recorder(self):
         """Test Recorder class is importable."""
-        from sttd import AudioConfig, Recorder
+        from voiced import AudioConfig, Recorder
 
         assert Recorder is not None
         assert AudioConfig is not None
 
     def test_import_speaker_identification(self):
         """Test speaker identification classes are importable."""
-        from sttd import (
+        from voiced import (
             ENROLLMENT_PROMPT,
             DiarizationConfig,
             DiarizedSegment,
@@ -45,22 +45,22 @@ class TestPublicImports:
 
     def test_import_profiles(self):
         """Test profile classes are importable."""
-        from sttd import ProfileManager, VoiceProfile
+        from voiced import ProfileManager, VoiceProfile
 
         assert VoiceProfile is not None
         assert ProfileManager is not None
 
     def test_import_config(self):
         """Test config classes are importable."""
-        from sttd import Config
+        from voiced import Config
 
         assert Config is not None
 
     def test_import_all(self):
         """Test __all__ contains expected items."""
-        import sttd
+        import voiced
 
-        assert hasattr(sttd, "__all__")
+        assert hasattr(voiced, "__all__")
         expected = [
             "__version__",
             "Transcriber",
@@ -78,14 +78,14 @@ class TestPublicImports:
             "Config",
         ]
         for item in expected:
-            assert item in sttd.__all__, f"{item} not in __all__"
+            assert item in voiced.__all__, f"{item} not in __all__"
 
     def test_all_items_accessible(self):
         """Test that all items in __all__ are accessible."""
-        import sttd
+        import voiced
 
-        for name in sttd.__all__:
-            assert hasattr(sttd, name), f"{name} in __all__ but not accessible"
+        for name in voiced.__all__:
+            assert hasattr(voiced, name), f"{name} in __all__ but not accessible"
 
 
 class TestSubmoduleImports:
@@ -93,20 +93,20 @@ class TestSubmoduleImports:
 
     def test_import_from_transcriber_module(self):
         """Test direct submodule import."""
-        from sttd.transcriber import Transcriber
+        from voiced.transcriber import Transcriber
 
         assert Transcriber is not None
 
     def test_import_from_config_module(self):
         """Test direct config import."""
-        from sttd.config import AudioConfig, TranscriptionConfig
+        from voiced.config import AudioConfig, TranscriptionConfig
 
         assert TranscriptionConfig is not None
         assert AudioConfig is not None
 
     def test_import_from_diarizer_module(self):
         """Test direct diarizer import."""
-        from sttd.diarizer import SpeakerEmbedder, SpeakerIdentifier
+        from voiced.diarizer import SpeakerEmbedder, SpeakerIdentifier
 
         assert SpeakerIdentifier is not None
         assert SpeakerEmbedder is not None
@@ -117,21 +117,21 @@ class TestPrivateModulesNotExposed:
 
     def test_daemon_not_in_all(self):
         """Test Daemon class is not in public API."""
-        import sttd
+        import voiced
 
-        assert "Daemon" not in sttd.__all__
-        assert not hasattr(sttd, "Daemon")
+        assert "Daemon" not in voiced.__all__
+        assert not hasattr(voiced, "Daemon")
 
     def test_server_not_in_all(self):
         """Test Server class is not in public API."""
-        import sttd
+        import voiced
 
-        assert "Server" not in sttd.__all__
-        assert not hasattr(sttd, "Server")
+        assert "Server" not in voiced.__all__
+        assert not hasattr(voiced, "Server")
 
     def test_cli_not_in_all(self):
         """Test CLI is not in public API."""
-        import sttd
+        import voiced
 
-        assert "main" not in sttd.__all__
-        assert not hasattr(sttd, "main")
+        assert "main" not in voiced.__all__
+        assert not hasattr(voiced, "main")

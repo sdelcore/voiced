@@ -3,8 +3,8 @@
 import numpy as np
 import pytest
 
-from sttd.config import TranscriptionConfig
-from sttd.transcriber import Transcriber
+from voiced.config import TranscriptionConfig
+from voiced.transcriber import Transcriber
 
 
 class TestTranscriberConfig:

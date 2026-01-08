@@ -1,5 +1,5 @@
 {
-  description = "sttd - Speech-to-Text Daemon";
+  description = "voiced - Voice Daemon (STT + TTS)";
 
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
@@ -12,10 +12,10 @@
         pkgs = nixpkgs.legacyPackages.${system};
         python = pkgs.python312;
 
-        # Python package for sttd
-        sttd = python.pkgs.buildPythonApplication {
-          pname = "sttd";
-          version = "0.1.0";
+        # Python package for voiced
+        voiced = python.pkgs.buildPythonApplication {
+          pname = "voiced";
+          version = "0.2.0";
           src = ./.;
           format = "pyproject";
 
@@ -24,19 +24,25 @@
           ];
 
           propagatedBuildInputs = with python.pkgs; [
+            # STT dependencies
             faster-whisper
+            speechbrain
+            # TTS dependencies
+            tqdm
+            websockets
+            # Shared dependencies
             sounddevice
+            soundfile
             numpy
+            scipy
             click
+            requests
+            huggingface-hub
+            # Linux/Wayland integration
             dasbus
             pillow
             pygobject3
-            # Speaker identification dependencies
-            scipy
-            soundfile
-            speechbrain
-            huggingface-hub
-            requests
+            # Speaker identification
             scikit-learn
           ];
 
@@ -51,8 +57,8 @@
           doCheck = false;
 
           meta = with pkgs.lib; {
-            description = "Speech-to-Text Daemon for Wayland/Hyprland";
-            homepage = "https://github.com/sdelcore/sttd";
+            description = "Voice Daemon - STT and TTS for Wayland/Hyprland";
+            homepage = "https://github.com/sdelcore/voiced";
             license = licenses.mit;
             platforms = platforms.linux;
           };
@@ -60,8 +66,8 @@
       in
       {
         packages = {
-          default = sttd;
-          sttd = sttd;
+          default = voiced;
+          voiced = voiced;
         };
 
         devShells.default = pkgs.mkShell {
@@ -75,6 +81,8 @@
               numpy
               click
               pillow
+              tqdm
+              websockets
               # D-Bus/tray dependencies
               pygobject3
               pycairo
@@ -106,12 +114,18 @@
           ];
 
           shellHook = ''
-            echo "sttd development environment"
+            echo "voiced development environment"
             echo "Python: $(python --version)"
             echo "uv: $(uv --version)"
 
             # Set up library paths for sounddevice and C++ stdlib
             export LD_LIBRARY_PATH="${pkgs.portaudio}/lib:${pkgs.stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH"
+
+            # Add NVIDIA driver libs for CUDA/GPU support
+            if [ -d /run/opengl-driver/lib ]; then
+              export LD_LIBRARY_PATH="/run/opengl-driver/lib:$LD_LIBRARY_PATH"
+              echo "CUDA: enabled (found /run/opengl-driver/lib)"
+            fi
 
             # GI typelib path for PyGObject
             export GI_TYPELIB_PATH="${pkgs.glib}/lib/girepository-1.0:${pkgs.gobject-introspection}/lib/girepository-1.0:$GI_TYPELIB_PATH"

@@ -8,7 +8,7 @@ from collections.abc import Callable
 import numpy as np
 import sounddevice as sd
 
-from sttd.config import AudioConfig
+from voiced.config import AudioConfig
 
 logger = logging.getLogger(__name__)
 
