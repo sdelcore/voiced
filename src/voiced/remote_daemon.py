@@ -3,21 +3,24 @@
 Records audio locally and sends to a remote server for transcription.
 """
 
+import json
 import logging
 import os
 import signal
 import sys
 import threading
 from enum import Enum
+from urllib.error import URLError
+from urllib.request import Request, urlopen
 
 import numpy as np
 
 from voiced import audio
 from voiced.config import Config, get_cache_dir, load_config
-from voiced.http_client import HttpConnectionError, HttpTimeoutError, ServerError, TranscriptionClient
 from voiced.injector import inject_to_clipboard
 from voiced.recorder import Recorder
 from voiced.tray import TrayIcon, TrayState
+from voiced.webrtc_client import SyncWebRTCClient, WebRTCClientConfig
 
 logger = logging.getLogger(__name__)
 
@@ -50,7 +53,10 @@ class RemoteDaemon:
         self.server_url = server_url
 
         effective_timeout = timeout or self.config.client.timeout
-        self.client = TranscriptionClient(server_url, timeout=effective_timeout)
+        self._webrtc_config = WebRTCClientConfig(
+            server_url=server_url,
+            timeout=effective_timeout,
+        )
 
         self._state = ClientState.IDLE
         self._running = False
@@ -143,13 +149,19 @@ class RemoteDaemon:
         return {"status": "ok", "state": "sending"}
 
     def _send_and_inject(self, audio_data: np.ndarray) -> None:
-        """Send audio to server and inject result to clipboard."""
+        """Send audio to server via WebRTC and inject result to clipboard."""
+        client = SyncWebRTCClient(self._webrtc_config)
         try:
-            text = self.client.transcribe(
+            logger.info("Connecting to server via WebRTC...")
+            client.connect()
+
+            result = client.batch_transcribe(
                 audio_data,
                 sample_rate=self.config.audio.sample_rate,
                 language=self.config.transcription.language,
             )
+
+            text = result.text if result else ""
 
             if text:
                 logger.info(f"Transcribed: {text[:100]}...")
@@ -164,16 +176,12 @@ class RemoteDaemon:
                 if self.config.audio.beep_enabled:
                     audio.beep_error()
 
-        except HttpConnectionError as e:
-            logger.error(f"Connection error: {e}")
+        except TimeoutError:
+            logger.error("WebRTC connection timeout")
             if self.config.audio.beep_enabled:
                 audio.beep_error()
-        except ServerError as e:
-            logger.error(f"Server error: {e}")
-            if self.config.audio.beep_enabled:
-                audio.beep_error()
-        except HttpTimeoutError as e:
-            logger.error(f"Timeout: {e}")
+        except RuntimeError as e:
+            logger.error(f"WebRTC error: {e}")
             if self.config.audio.beep_enabled:
                 audio.beep_error()
         except Exception:
@@ -181,6 +189,7 @@ class RemoteDaemon:
             if self.config.audio.beep_enabled:
                 audio.beep_error()
         finally:
+            client.disconnect()
             self._state = ClientState.IDLE
             self._update_tray_state()
 
@@ -215,15 +224,21 @@ class RemoteDaemon:
         signal.signal(signal.SIGINT, signal_handler)
 
     def _check_server(self) -> bool:
-        """Check if server is available."""
+        """Check if server is available via HTTP health endpoint."""
         try:
-            health = self.client.health_check()
+            url = f"{self.server_url.rstrip('/')}/health"
+            request = Request(url, method="GET")
+            response = urlopen(request, timeout=5.0)
+            health = json.loads(response.read().decode("utf-8"))
             logger.info(
                 f"Server available: model={health.get('model')}, device={health.get('device')}"
             )
             return True
-        except HttpConnectionError as e:
+        except URLError as e:
             logger.error(f"Server not available: {e}")
+            return False
+        except Exception as e:
+            logger.error(f"Error checking server: {e}")
             return False
 
     def run(self) -> None:

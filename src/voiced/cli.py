@@ -135,11 +135,16 @@ def start(
 @click.option("--no-vad", is_flag=True, help="Disable voice activity detection")
 @click.pass_context
 def server(
-    ctx: click.Context, host: str | None, port: int | None, daemon: bool, no_vad: bool
+    ctx: click.Context,
+    host: str | None,
+    port: int | None,
+    daemon: bool,
+    no_vad: bool,
 ) -> None:
     """Start the transcription HTTP server.
 
     The server accepts audio via HTTP POST and returns transcribed text.
+    WebRTC is always enabled for real-time streaming.
     Bind to 0.0.0.0 to accept connections from other machines.
 
     Examples:
@@ -168,12 +173,17 @@ def server(
 
     click.echo(f"Starting transcription server on {effective_host}:{effective_port}")
     click.echo(f"Model: {config.transcription.model}")
+    click.echo("WebRTC: enabled")
 
     if daemon:
         click.echo("Daemonizing...")
         daemonize()
 
-    srv = TranscriptionServer(host=effective_host, port=effective_port, config=config)
+    srv = TranscriptionServer(
+        host=effective_host,
+        port=effective_port,
+        config=config,
+    )
 
     def handle_sigterm(signum, frame):
         click.echo("\nShutting down server...")
@@ -239,6 +249,109 @@ def client_cmd(
             timeout=timeout,
         )
         client.run()
+    except KeyboardInterrupt:
+        click.echo("\nClient interrupted")
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+
+
+@main.command("webrtc-client")
+@click.option(
+    "--server", "server_url", default=None, help="Server URL (e.g., http://192.168.1.100:8765)"
+)
+@click.option("--timeout", type=float, default=30.0, help="Connection timeout in seconds")
+@click.pass_context
+def webrtc_client_cmd(
+    ctx: click.Context, server_url: str | None, timeout: float
+) -> None:
+    """Start interactive WebRTC client for real-time streaming.
+
+    Connects to a server with WebRTC enabled for low-latency bidirectional
+    audio streaming. Supports real-time STT and TTS.
+
+    Examples:
+
+        voiced webrtc-client --server http://192.168.1.100:8765
+
+        # Interactive mode with real-time transcription
+        voiced webrtc-client
+    """
+    import asyncio
+
+    from voiced.config import get_server_url
+    from voiced.webrtc_client import STTResult, WebRTCClient, WebRTCClientConfig
+
+    effective_url = get_server_url(server_url)
+
+    click.echo("Starting WebRTC client")
+    click.echo(f"Server: {effective_url}")
+
+    client_config = WebRTCClientConfig(
+        server_url=effective_url,
+        timeout=timeout,
+    )
+
+    async def run_interactive():
+        client = WebRTCClient(client_config)
+
+        # Set up callbacks for real-time feedback
+        def on_partial(text: str):
+            click.echo(f"\r[partial] {text}", nl=False)
+
+        def on_final(result: STTResult):
+            click.echo(f"\r[final] {result.text}")
+            if result.segments:
+                for seg in result.segments:
+                    speaker = seg.get("speaker", "Unknown")
+                    text = seg.get("text", "")
+                    click.echo(f"  [{speaker}] {text}")
+
+        def on_error(code: str, message: str):
+            click.echo(f"Error: {code} - {message}", err=True)
+
+        client.set_callbacks(
+            on_stt_partial=on_partial,
+            on_stt_final=on_final,
+            on_error=on_error,
+        )
+
+        try:
+            click.echo("Connecting...")
+            await client.connect()
+            click.echo("Connected! Commands: r=record, s=stop, t <text>=TTS, q=quit")
+
+            while True:
+                # Simple command loop
+                loop = asyncio.get_event_loop()
+                cmd = await loop.run_in_executor(None, input, "> ")
+                cmd = cmd.strip()
+
+                if cmd == "q":
+                    break
+                elif cmd == "r":
+                    click.echo("Recording... (press 's' to stop)")
+                    await client.start_stt(identify_speakers=True)
+                elif cmd == "s":
+                    result = await client.stop_stt()
+                    click.echo(f"Transcription: {result.text}")
+                elif cmd.startswith("t "):
+                    text = cmd[2:].strip()
+                    if text:
+                        click.echo(f"Speaking: {text}")
+                        await client.speak(text)
+                        click.echo("Done speaking")
+                elif cmd:
+                    click.echo("Unknown command. Use 'r', 's', 't <text>', or 'q'")
+
+        except Exception as e:
+            click.echo(f"Error: {e}", err=True)
+        finally:
+            await client.disconnect()
+            click.echo("Disconnected")
+
+    try:
+        asyncio.run(run_interactive())
     except KeyboardInterrupt:
         click.echo("\nClient interrupted")
     except Exception as e:
@@ -390,15 +503,10 @@ def _transcribe_remote(
     timeout: float,
     annotate: bool,
 ) -> None:
-    """Transcribe using remote HTTP server."""
+    """Transcribe using remote server via WebRTC."""
     import soundfile as sf
 
-    from voiced.http_client import (
-        HttpConnectionError,
-        HttpTimeoutError,
-        ServerError,
-        TranscriptionClient,
-    )
+    from voiced.webrtc_client import SyncWebRTCClient, WebRTCClientConfig
 
     # Load audio file
     audio, sample_rate = sf.read(str(audio_file), dtype="float32")
@@ -407,20 +515,25 @@ def _transcribe_remote(
     if len(audio.shape) > 1:
         audio = audio.mean(axis=1)
 
-    client = TranscriptionClient(server_url, timeout=timeout)
+    config = WebRTCClientConfig(server_url=server_url, timeout=timeout)
+    client = SyncWebRTCClient(config)
 
     try:
+        click.echo("Connecting via WebRTC...", err=True)
+        client.connect()
+
         # Server handles diarization when identify_speakers=True
-        result = client.transcribe(
+        result = client.batch_transcribe(
             audio,
             sample_rate=sample_rate,
             identify_speakers=annotate,
+            timeout=timeout,
         )
 
-        if annotate and "segments" in result:
+        if annotate and result.segments:
             # Format segments with speaker info
             output_lines = []
-            for seg in result["segments"]:
+            for seg in result.segments:
                 start = seg.get("start", 0)
                 end = seg.get("end", 0)
                 speaker = seg.get("speaker", "Unknown")
@@ -429,7 +542,7 @@ def _transcribe_remote(
                 output_lines.append(f"{time_str} {speaker}: {text}")
             text = "\n".join(output_lines)
         else:
-            text = result.get("text", "")
+            text = result.text
 
         if output:
             with open(output, "w") as f:
@@ -438,15 +551,13 @@ def _transcribe_remote(
         else:
             click.echo(text)
 
-    except ServerError as e:
-        click.echo(f"Server error: {e}", err=True)
+    except Exception as e:
+        import traceback
+        click.echo(f"Error ({type(e).__name__}): {e}", err=True)
+        traceback.print_exc()
         sys.exit(1)
-    except HttpConnectionError as e:
-        click.echo(f"Connection error: {e}", err=True)
-        sys.exit(1)
-    except HttpTimeoutError as e:
-        click.echo(f"Timeout: {e}", err=True)
-        sys.exit(1)
+    finally:
+        client.disconnect()
 
 
 def _transcribe_local(
@@ -1360,14 +1471,31 @@ def _speak_remote(
     timeout: float,
     cfg_scale: float | None,
 ) -> None:
-    """Synthesize speech using remote server."""
+    """Synthesize speech using remote server via WebRTC."""
+    from voiced.webrtc_client import SyncWebRTCClient, WebRTCClientConfig
+
     click.echo(f"Using remote server: {server_url}", err=True)
     click.echo(f"Synthesizing: {text[:50]}{'...' if len(text) > 50 else ''}", err=True)
 
-    # TODO: Implement HTTP client for TTS
-    # For now, show a placeholder message
-    click.echo("Error: Remote TTS not yet implemented", err=True)
-    sys.exit(1)
+    if output_file:
+        click.echo("Note: --output not supported with remote TTS (audio plays directly)", err=True)
+
+    config = WebRTCClientConfig(server_url=server_url, timeout=timeout)
+    client = SyncWebRTCClient(config)
+
+    try:
+        click.echo("Connecting via WebRTC...", err=True)
+        client.connect()
+
+        # Speak via WebRTC - audio is streamed to local playback
+        client.speak(text, voice=voice, cfg_scale=cfg_scale, timeout=timeout)
+        click.echo("Done", err=True)
+
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
+    finally:
+        client.disconnect()
 
 
 # Voice management command group

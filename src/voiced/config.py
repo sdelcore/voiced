@@ -76,6 +76,14 @@ class DaemonConfig:
 
 
 @dataclass
+class WebRTCConfig:
+    """WebRTC streaming settings."""
+
+    audio_codec: str = "opus"  # Audio codec (opus is standard)
+    sample_rate: int = 48000  # WebRTC audio sample rate
+
+
+@dataclass
 class ServerConfig:
     """HTTP server settings."""
 
@@ -101,6 +109,7 @@ class Config:
     diarization: DiarizationConfig = field(default_factory=DiarizationConfig)
     tts: TTSConfig = field(default_factory=TTSConfig)
     daemon: DaemonConfig = field(default_factory=DaemonConfig)
+    webrtc: WebRTCConfig = field(default_factory=WebRTCConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     client: ClientConfig = field(default_factory=ClientConfig)
 
@@ -185,6 +194,11 @@ def load_config() -> Config:
             if hasattr(config.daemon, key):
                 setattr(config.daemon, key, value)
 
+    if "webrtc" in data:
+        for key, value in data["webrtc"].items():
+            if hasattr(config.webrtc, key):
+                setattr(config.webrtc, key, value)
+
     if "server" in data:
         for key, value in data["server"].items():
             if hasattr(config.server, key):
@@ -262,6 +276,10 @@ unload_timeout_minutes = 60  # Auto-unload after inactivity (0 = never)
 http_enabled = false     # Start HTTP server alongside Unix socket
 # http_host = "0.0.0.0"  # Override server.host for daemon HTTP
 # http_port = 8765       # Override server.port for daemon HTTP
+
+[webrtc]
+audio_codec = "opus"     # Audio codec (opus is standard)
+sample_rate = 48000      # WebRTC audio sample rate
 
 [server]
 host = "127.0.0.1"       # 0.0.0.0 to accept remote connections

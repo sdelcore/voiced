@@ -18,6 +18,7 @@ from voiced.config import Config, load_config
 from voiced.diarizer import SpeakerIdentifier
 from voiced.profiles import ProfileManager, VoiceProfile
 from voiced.transcriber import Transcriber
+from voiced.webrtc_server import WebRTCConnectionManager
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,10 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
 
     # TTS synthesizer (lazy-loaded, shared across requests)
     _synthesizer = None
+
+    # WebRTC connection manager
+    _webrtc_manager: WebRTCConnectionManager | None = None
+    _asyncio_loop = None
 
     def log_message(self, format: str, *args) -> None:
         logger.info("%s - %s", self.address_string(), format % args)
@@ -149,6 +154,10 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
                 self._handle_download_voice(name)
             else:
                 self._send_error_json(404, "Not found", "NOT_FOUND")
+        elif path == "/webrtc/offer":
+            self._handle_webrtc_offer()
+        elif path == "/webrtc/ice":
+            self._handle_webrtc_ice()
         else:
             self._send_error_json(404, "Not found", "NOT_FOUND")
 
@@ -223,6 +232,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         # Use FFmpeg to convert any audio format to WAV, then read with soundfile
         import os
         import subprocess
+
         import soundfile as sf
 
         # Determine file extension from Content-Type header
@@ -250,7 +260,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             # For non-WAV formats, convert to WAV using FFmpeg
             if suffix != ".wav":
                 wav_path = temp_path.rsplit(".", 1)[0] + ".wav"
-                result = subprocess.run(
+                subprocess.run(
                     [
                         "ffmpeg",
                         "-y",
@@ -488,7 +498,6 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         logger.info(f"Creating profile '{name}' from {duration:.1f}s of audio")
 
         try:
-            from voiced.diarizer import SpeakerEmbedder
 
             # Get or create embedder
             identifier = self._get_speaker_identifier()
@@ -720,6 +729,111 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             logger.exception(f"TTS synthesis failed: {e}")
             self._send_error_json(500, f"Synthesis failed: {e}", "SYNTHESIS_ERROR")
 
+    def _handle_webrtc_offer(self) -> None:
+        """Handle WebRTC offer for connection establishment."""
+        import asyncio
+
+        if TranscriptionHandler._webrtc_manager is None:
+            self._send_error_json(503, "WebRTC not initialized", "WEBRTC_NOT_INITIALIZED")
+            return
+
+        if TranscriptionHandler._asyncio_loop is None:
+            self._send_error_json(503, "WebRTC event loop not running", "WEBRTC_NOT_READY")
+            return
+
+        # Read request body
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length == 0:
+            self._send_error_json(400, "No offer provided", "NO_OFFER")
+            return
+
+        if content_length > 64 * 1024:  # 64KB limit for SDP
+            self._send_error_json(413, "Offer too large", "OFFER_TOO_LARGE")
+            return
+
+        try:
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode("utf-8"))
+            offer_sdp = data.get("sdp")
+
+            if not offer_sdp:
+                self._send_error_json(400, "No SDP in offer", "NO_SDP")
+                return
+
+            # Run async operation in the event loop
+            future = asyncio.run_coroutine_threadsafe(
+                TranscriptionHandler._webrtc_manager.create_session(offer_sdp),
+                TranscriptionHandler._asyncio_loop,
+            )
+            session_id, answer_sdp, ice_candidates = future.result(timeout=10.0)
+
+            self._send_json(200, {
+                "session_id": session_id,
+                "sdp": answer_sdp,
+                "type": "answer",
+                "ice_candidates": ice_candidates,
+            })
+
+        except json.JSONDecodeError:
+            self._send_error_json(400, "Invalid JSON", "INVALID_JSON")
+        except TimeoutError:
+            self._send_error_json(504, "Connection timeout", "CONNECTION_TIMEOUT")
+        except Exception as e:
+            logger.exception(f"WebRTC offer handling failed: {e}")
+            self._send_error_json(500, f"Failed to create session: {e}", "SESSION_ERROR")
+
+    def _handle_webrtc_ice(self) -> None:
+        """Handle ICE candidate from client."""
+        import asyncio
+
+        if TranscriptionHandler._webrtc_manager is None:
+            self._send_error_json(503, "WebRTC not initialized", "WEBRTC_NOT_INITIALIZED")
+            return
+
+        if TranscriptionHandler._asyncio_loop is None:
+            self._send_error_json(503, "WebRTC event loop not running", "WEBRTC_NOT_READY")
+            return
+
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length == 0:
+            self._send_error_json(400, "No ICE candidate provided", "NO_ICE")
+            return
+
+        try:
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode("utf-8"))
+
+            session_id = data.get("session_id")
+            candidate = data.get("candidate")
+
+            if not session_id:
+                self._send_error_json(400, "No session_id provided", "NO_SESSION_ID")
+                return
+
+            if not candidate:
+                self._send_error_json(400, "No candidate provided", "NO_CANDIDATE")
+                return
+
+            # Run async operation in the event loop
+            future = asyncio.run_coroutine_threadsafe(
+                TranscriptionHandler._webrtc_manager.add_ice_candidate(session_id, candidate),
+                TranscriptionHandler._asyncio_loop,
+            )
+            success = future.result(timeout=5.0)
+
+            if success:
+                self._send_json(200, {"status": "ok"})
+            else:
+                self._send_error_json(404, "Session not found", "SESSION_NOT_FOUND")
+
+        except json.JSONDecodeError:
+            self._send_error_json(400, "Invalid JSON", "INVALID_JSON")
+        except TimeoutError:
+            self._send_error_json(504, "ICE handling timeout", "ICE_TIMEOUT")
+        except Exception as e:
+            logger.exception(f"ICE candidate handling failed: {e}")
+            self._send_error_json(500, f"Failed to add ICE candidate: {e}", "ICE_ERROR")
+
     def _audio_to_wav(self, audio: np.ndarray, sample_rate: int) -> bytes:
         """Convert numpy audio array to WAV bytes."""
         buffer = io.BytesIO()
@@ -752,11 +866,77 @@ class TranscriptionServer:
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._running = False
+        self._asyncio_thread: threading.Thread | None = None
+        self._asyncio_loop = None
 
     def _preload_model(self) -> None:
         logger.info("Pre-loading transcription model...")
         _ = self.transcriber.model
         logger.info("Model loaded successfully")
+
+    def _start_asyncio_loop(self) -> None:
+        """Start asyncio event loop in a separate thread."""
+        import asyncio
+
+        self._asyncio_loop = asyncio.new_event_loop()
+        asyncio.set_event_loop(self._asyncio_loop)
+        self._asyncio_loop.run_forever()
+
+    def _init_webrtc(self) -> None:
+        """Initialize WebRTC connection manager."""
+        # Start asyncio event loop in background thread
+        self._asyncio_thread = threading.Thread(
+            target=self._start_asyncio_loop, daemon=True, name="asyncio-webrtc"
+        )
+        self._asyncio_thread.start()
+
+        # Wait for event loop to be ready
+        while self._asyncio_loop is None:
+            time.sleep(0.01)
+
+        # Create WebRTC connection manager
+        webrtc_manager = WebRTCConnectionManager(
+            transcriber=self.transcriber,
+            synthesizer=TranscriptionHandler._synthesizer,
+            speaker_identifier=TranscriptionHandler._speaker_identifier,
+        )
+        webrtc_manager.set_event_loop(self._asyncio_loop)
+
+        TranscriptionHandler._webrtc_manager = webrtc_manager
+        TranscriptionHandler._asyncio_loop = self._asyncio_loop
+
+        logger.info("WebRTC enabled")
+
+    def _stop_webrtc(self) -> None:
+        """Stop WebRTC and asyncio event loop."""
+        import asyncio
+
+        if TranscriptionHandler._webrtc_manager is not None:
+            # Close all WebRTC sessions
+            if self._asyncio_loop and self._asyncio_loop.is_running():
+                future = asyncio.run_coroutine_threadsafe(
+                    TranscriptionHandler._webrtc_manager.close_all(),
+                    self._asyncio_loop,
+                )
+                try:
+                    future.result(timeout=5.0)
+                except Exception as e:
+                    logger.warning(f"Error closing WebRTC sessions: {e}")
+
+            TranscriptionHandler._webrtc_manager = None
+
+        # Stop asyncio event loop
+        if self._asyncio_loop:
+            self._asyncio_loop.call_soon_threadsafe(self._asyncio_loop.stop)
+
+        if self._asyncio_thread:
+            self._asyncio_thread.join(timeout=5)
+            self._asyncio_thread = None
+
+        TranscriptionHandler._asyncio_loop = None
+        self._asyncio_loop = None
+
+        logger.info("WebRTC stopped")
 
     def start(self, preload: bool = True) -> None:
         """Start the HTTP server."""
@@ -770,6 +950,9 @@ class TranscriptionServer:
         TranscriptionHandler.config = self.config
         TranscriptionHandler.start_time = time.time()
         TranscriptionHandler.request_count = 0
+
+        # Initialize WebRTC
+        self._init_webrtc()
 
         self._server = ThreadingHTTPServer(
             (self.host, self.port),
@@ -793,6 +976,9 @@ class TranscriptionServer:
         TranscriptionHandler.start_time = time.time()
         TranscriptionHandler.request_count = 0
 
+        # Initialize WebRTC
+        self._init_webrtc()
+
         self._server = ThreadingHTTPServer(
             (self.host, self.port),
             TranscriptionHandler,
@@ -809,6 +995,10 @@ class TranscriptionServer:
             return
 
         self._running = False
+
+        # Stop WebRTC first
+        self._stop_webrtc()
+
         if self._server:
             self._server.shutdown()
             self._server = None

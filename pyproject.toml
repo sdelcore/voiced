@@ -27,7 +27,8 @@ dependencies = [
     "speechbrain>=1.0.0,<1.1.0",
     # TTS dependencies (VibeVoice installed separately)
     "tqdm>=4.65.0",
-    "websockets>=12.0",
+    # WebRTC for real-time audio streaming
+    "aiortc>=1.6.0",
     # Shared dependencies
     "sounddevice>=0.4.6",
     "soundfile>=0.12.0",
