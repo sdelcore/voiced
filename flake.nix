@@ -68,7 +68,7 @@
           VOICED_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}/voiced"
           VENV_DIR="$VOICED_HOME/venv"
           VERSION_FILE="$VENV_DIR/.version"
-          CURRENT_VERSION="0.2.1"
+          CURRENT_VERSION="0.2.2"
           SOURCE_DIR="${voicedSrc}"
 
           export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath runtimeDeps}:''${LD_LIBRARY_PATH:-}"
@@ -93,6 +93,10 @@
             # Install voiced from bundled source
             # PyGObject removed from deps - provided by pythonEnv system-site-packages
             ${pkgs.uv}/bin/uv pip install "$SOURCE_DIR" --quiet
+
+            # Install VibeVoice for TTS support
+            echo "Installing VibeVoice for TTS..."
+            ${pkgs.uv}/bin/uv pip install "git+https://github.com/microsoft/VibeVoice.git" --quiet
 
             echo "$CURRENT_VERSION" > "$VERSION_FILE"
             echo "Setup complete!"
