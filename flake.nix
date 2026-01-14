@@ -22,6 +22,13 @@
           gobject-introspection.dev
           cairo
           cairo.dev
+          # X11/XCB deps for pycairo build
+          xorg.libxcb
+          xorg.libxcb.dev
+          xorg.libX11
+          xorg.libX11.dev
+          xorg.libXrender
+          xorg.libXrender.dev
           wtype
           wl-clipboard
           stdenv.cc.cc.lib
