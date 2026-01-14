@@ -40,7 +40,7 @@ dependencies = [
     # Linux/Wayland integration
     "dasbus>=1.7",
     "Pillow>=10.0.0",
-    "PyGObject>=3.42.0",
+    # PyGObject provided by nix pythonEnv (avoid pycairo rebuild)
     # Speaker identification
     "scikit-learn>=1.0.0",
 ]

@@ -88,8 +88,8 @@
             source "$VENV_DIR/bin/activate"
 
             # Install voiced from bundled source
-            # Use --no-build-isolation to use system packages for pycairo/pygobject
-            ${pkgs.uv}/bin/uv pip install "$SOURCE_DIR" --quiet --no-build-isolation
+            # PyGObject removed from deps - provided by pythonEnv system-site-packages
+            ${pkgs.uv}/bin/uv pip install "$SOURCE_DIR" --quiet
 
             echo "$CURRENT_VERSION" > "$VERSION_FILE"
             echo "Setup complete!"
