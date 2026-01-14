@@ -17,8 +17,11 @@
           portaudio
           ffmpeg
           glib
+          glib.dev
           gobject-introspection
+          gobject-introspection.dev
           cairo
+          cairo.dev
           wtype
           wl-clipboard
           stdenv.cc.cc.lib
