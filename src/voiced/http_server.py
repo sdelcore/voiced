@@ -142,6 +142,8 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             self._handle_transcribe(parsed.query)
         elif path == "/synthesize":
             self._handle_synthesize(parsed.query)
+        elif path == "/synthesize/stream":
+            self._handle_synthesize_stream(parsed.query)
         elif path.startswith("/profiles/"):
             name = self._parse_profile_name(path)
             if name:
@@ -728,6 +730,127 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.exception(f"TTS synthesis failed: {e}")
             self._send_error_json(500, f"Synthesis failed: {e}", "SYNTHESIS_ERROR")
+
+    def _handle_synthesize_stream(self, query_string: str) -> None:
+        """Handle POST /synthesize/stream - streaming TTS synthesis.
+
+        Returns audio chunks using chunked transfer encoding for low-latency playback.
+        Each chunk is a raw PCM frame (24kHz, mono, int16).
+        """
+        import queue
+        import struct
+        import threading
+
+        # Check if TTS is enabled
+        synthesizer = self._get_synthesizer()
+        if synthesizer is None:
+            self._send_error_json(
+                503,
+                "TTS is not available (VibeVoice not installed or TTS disabled)",
+                "TTS_UNAVAILABLE",
+            )
+            return
+
+        # Parse request body
+        content_length = int(self.headers.get("Content-Length", 0))
+        if content_length == 0:
+            self._send_error_json(400, "No request body", "NO_BODY")
+            return
+
+        if content_length > 1024 * 1024:
+            self._send_error_json(413, "Request body too large (max 1MB)", "BODY_TOO_LARGE")
+            return
+
+        try:
+            body = self.rfile.read(content_length)
+            data = json.loads(body.decode("utf-8"))
+        except json.JSONDecodeError as e:
+            self._send_error_json(400, f"Invalid JSON: {e}", "INVALID_JSON")
+            return
+
+        text = data.get("text", "").strip()
+        if not text:
+            self._send_error_json(400, "No text provided", "NO_TEXT")
+            return
+
+        if len(text) > 10000:
+            self._send_error_json(400, "Text too long (max 10000 chars)", "TEXT_TOO_LONG")
+            return
+
+        voice = data.get("voice") or self.config.tts.default_voice
+        cfg_scale = data.get("cfg_scale") or self.config.tts.cfg_scale
+
+        logger.info(f"Streaming synthesis of {len(text)} chars with voice '{voice}'")
+
+        # Queue for passing chunks from generator thread to HTTP response
+        chunk_queue: queue.Queue[bytes | None] = queue.Queue()
+        generation_error: list[Exception] = []
+
+        def generate_chunks():
+            """Generate TTS chunks in background thread."""
+            try:
+                first_chunk = True
+                for chunk in synthesizer.synthesize_streaming(
+                    text, voice=voice, cfg_scale=cfg_scale
+                ):
+                    if first_chunk:
+                        logger.info("First TTS chunk generated")
+                        first_chunk = False
+                    # Convert float32 audio to int16 bytes
+                    audio_int16 = (chunk * 32767).astype(np.int16)
+                    chunk_queue.put(audio_int16.tobytes())
+                chunk_queue.put(None)  # Signal end
+            except Exception as e:
+                generation_error.append(e)
+                chunk_queue.put(None)
+
+        # Start generation in background thread
+        gen_thread = threading.Thread(target=generate_chunks, daemon=True)
+        gen_thread.start()
+
+        try:
+            # Send chunked response
+            self.send_response(200)
+            self.send_header("Content-Type", "audio/pcm")
+            self.send_header("Transfer-Encoding", "chunked")
+            self.send_header("X-Sample-Rate", str(synthesizer.sample_rate))
+            self.send_header("X-Channels", "1")
+            self.send_header("X-Sample-Width", "2")  # 16-bit
+            self.send_header("X-Voice", voice)
+            self.end_headers()
+
+            total_bytes = 0
+            while True:
+                try:
+                    chunk = chunk_queue.get(timeout=30.0)
+                    if chunk is None:
+                        break
+                    # Write chunk in HTTP chunked encoding format
+                    chunk_header = f"{len(chunk):x}\r\n".encode("ascii")
+                    self.wfile.write(chunk_header)
+                    self.wfile.write(chunk)
+                    self.wfile.write(b"\r\n")
+                    self.wfile.flush()
+                    total_bytes += len(chunk)
+                except queue.Empty:
+                    logger.warning("Chunk generation timeout")
+                    break
+
+            # Write final chunk (empty)
+            self.wfile.write(b"0\r\n\r\n")
+            self.wfile.flush()
+
+            gen_thread.join(timeout=5.0)
+
+            if generation_error:
+                logger.error(f"Streaming synthesis error: {generation_error[0]}")
+            else:
+                duration = total_bytes / (synthesizer.sample_rate * 2)  # 2 bytes per sample
+                logger.info(f"Streamed {total_bytes} bytes ({duration:.2f}s of audio)")
+                TranscriptionHandler.tts_request_count += 1
+
+        except Exception as e:
+            logger.exception(f"Streaming synthesis failed: {e}")
 
     def _handle_webrtc_offer(self) -> None:
         """Handle WebRTC offer for connection establishment."""

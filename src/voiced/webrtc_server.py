@@ -611,25 +611,51 @@ class WebRTCConnectionManager:
         asyncio.create_task(self._run_tts_streaming(session, text))
 
     async def _run_tts_streaming(self, session: WebRTCSession, text: str) -> None:
-        """Run TTS streaming in background."""
+        """Run TTS streaming in background with true chunk-by-chunk delivery."""
         try:
-            loop = asyncio.get_event_loop()
+            import queue
+            import threading
 
-            # Run streaming synthesis in thread pool
+            chunk_queue: queue.Queue[np.ndarray | None] = queue.Queue()
+            generation_error: list[Exception] = []
+
             def generate_chunks():
-                return list(self.synthesizer.synthesize_streaming(
-                    text,
-                    voice=session.tts_config.voice,
-                    cfg_scale=session.tts_config.cfg_scale,
-                ))
+                """Generate TTS chunks in background thread."""
+                try:
+                    for chunk in self.synthesizer.synthesize_streaming(
+                        text,
+                        voice=session.tts_config.voice,
+                        cfg_scale=session.tts_config.cfg_scale,
+                    ):
+                        chunk_queue.put(chunk)
+                    chunk_queue.put(None)  # Signal end
+                except Exception as e:
+                    generation_error.append(e)
+                    chunk_queue.put(None)
 
-            chunks = await loop.run_in_executor(None, generate_chunks)
+            # Start generation in background thread
+            gen_thread = threading.Thread(target=generate_chunks, daemon=True)
+            gen_thread.start()
 
-            for chunk in chunks:
-                if not session._tts_active:
-                    break
-                if session.tts_track:
-                    await session.tts_track.push_audio(chunk)
+            # Stream chunks as they arrive
+            first_chunk = True
+            while session._tts_active:
+                try:
+                    chunk = chunk_queue.get(timeout=0.1)
+                    if chunk is None:
+                        break
+                    if session.tts_track:
+                        await session.tts_track.push_audio(chunk)
+                        if first_chunk:
+                            logger.info("First TTS chunk delivered")
+                            first_chunk = False
+                except queue.Empty:
+                    continue
+
+            gen_thread.join(timeout=5.0)
+
+            if generation_error:
+                raise generation_error[0]
 
             if session.tts_track:
                 await session.tts_track.stop_streaming()
