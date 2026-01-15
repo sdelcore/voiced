@@ -113,6 +113,7 @@
             pythonEnv
             pkgs.uv
             pkgs.git
+            pkgs.openssh
             # Build tools needed for pycairo/pygobject compilation
             pkgs.gcc
             pkgs.pkg-config
