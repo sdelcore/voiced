@@ -112,6 +112,7 @@
           targetPkgs = pkgs: runtimeDeps ++ [
             pythonEnv
             pkgs.uv
+            pkgs.git
             # Build tools needed for pycairo/pygobject compilation
             pkgs.gcc
             pkgs.pkg-config
