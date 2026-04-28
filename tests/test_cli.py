@@ -20,7 +20,7 @@ class TestCLI:
         runner = CliRunner()
         result = runner.invoke(main, ["--help"])
         assert result.exit_code == 0
-        assert "Speech-to-Text Daemon" in result.output
+        assert "Voice Daemon" in result.output
 
     def test_status_not_running(self):
         """Test status when daemon is not running."""

@@ -1,12 +1,12 @@
 [project]
 name = "voiced"
-version = "0.2.0"
+version = "0.3.0"
 description = "Voice daemon - Speech-to-Text and Text-to-Speech for Linux/Wayland"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "sdelcore" }]
-keywords = ["speech-to-text", "text-to-speech", "whisper", "tts", "stt", "transcription", "speaker-identification", "faster-whisper", "vibevoice", "daemon", "wayland"]
+keywords = ["speech-to-text", "text-to-speech", "parakeet", "nemo", "tts", "stt", "transcription", "speaker-identification", "vibevoice", "daemon", "wayland"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -22,8 +22,8 @@ classifiers = [
 ]
 
 dependencies = [
-    # STT dependencies
-    "faster-whisper>=1.0.0",
+    # STT (NVIDIA Parakeet-TDT via NeMo)
+    "nemo_toolkit[asr]>=2.4",
     "speechbrain>=1.0.0,<1.1.0",
     # TTS dependencies (VibeVoice installed separately)
     "tqdm>=4.65.0",

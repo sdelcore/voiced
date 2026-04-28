@@ -1,77 +1,197 @@
-"""Tests for transcriber module."""
+"""Tests for transcriber module.
+
+These tests stub out NeMo so they can run without GPU or model downloads.
+"""
+
+from types import SimpleNamespace
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
 
 from voiced.config import TranscriptionConfig
-from voiced.transcriber import Transcriber
+from voiced.transcriber import STT_SAMPLE_RATE, Transcriber
+
+
+def _fake_result(
+    text: str = "hello world",
+    *,
+    segments: list[dict] | None = None,
+    words: list[dict] | None = None,
+) -> SimpleNamespace:
+    """Build a fake NeMo transcription result."""
+    timestamp: dict = {}
+    if segments is not None:
+        timestamp["segment"] = segments
+    if words is not None:
+        timestamp["word"] = words
+    return SimpleNamespace(text=text, timestamp=timestamp)
 
 
 class TestTranscriberConfig:
-    """Tests for transcriber configuration."""
-
     def test_default_config(self):
-        """Test default configuration values."""
         config = TranscriptionConfig()
-        assert config.model == "base"
+        assert config.model == "nvidia/parakeet-tdt-0.6b-v3"
         assert config.device == "auto"
-        assert config.compute_type == "auto"
         assert config.language == "en"
 
     def test_custom_config(self):
-        """Test custom configuration."""
         config = TranscriptionConfig(
-            model="tiny",
+            model="nvidia/parakeet-tdt-0.6b-v2",
             device="cpu",
-            compute_type="int8",
             language="en",
         )
-        assert config.model == "tiny"
+        assert config.model == "nvidia/parakeet-tdt-0.6b-v2"
         assert config.device == "cpu"
-        assert config.compute_type == "int8"
 
 
-class TestTranscriber:
-    """Tests for Transcriber class."""
-
+class TestTranscriberInit:
     def test_init(self):
-        """Test transcriber initialization."""
         transcriber = Transcriber()
-        assert transcriber.config.model == "base"
-        assert transcriber._model is None  # Model not loaded yet
+        assert transcriber.config.model == "nvidia/parakeet-tdt-0.6b-v3"
+        assert transcriber._model is None  # Lazy load
 
     def test_init_with_config(self):
-        """Test transcriber initialization with custom config."""
-        config = TranscriptionConfig(model="tiny")
+        config = TranscriptionConfig(model="nvidia/parakeet-tdt-0.6b-v2")
         transcriber = Transcriber(config)
-        assert transcriber.config.model == "tiny"
+        assert transcriber.config.model == "nvidia/parakeet-tdt-0.6b-v2"
 
     def test_get_device_explicit(self):
-        """Test explicit device selection."""
         config = TranscriptionConfig(device="cpu")
         transcriber = Transcriber(config)
         assert transcriber._get_device() == "cpu"
 
-    def test_get_compute_type_cpu(self):
-        """Test compute type for CPU."""
-        config = TranscriptionConfig(compute_type="auto")
+    def test_get_device_explicit_cuda(self):
+        config = TranscriptionConfig(device="cuda")
         transcriber = Transcriber(config)
-        assert transcriber._get_compute_type("cpu") == "int8"
+        assert transcriber._get_device() == "cuda"
 
-    def test_get_compute_type_cuda(self):
-        """Test compute type for CUDA."""
-        config = TranscriptionConfig(compute_type="auto")
-        transcriber = Transcriber(config)
-        assert transcriber._get_compute_type("cuda") == "float16"
 
-    def test_get_compute_type_explicit(self):
-        """Test explicit compute type."""
-        config = TranscriptionConfig(compute_type="float32")
-        transcriber = Transcriber(config)
-        assert transcriber._get_compute_type("cpu") == "float32"
-
+class TestTranscriberFileNotFound:
     def test_transcribe_file_not_found(self):
-        """Test transcribing non-existent file."""
         transcriber = Transcriber()
         with pytest.raises(FileNotFoundError):
             transcriber.transcribe_file("/nonexistent/audio.wav")
+
+    def test_transcribe_file_with_segments_not_found(self):
+        transcriber = Transcriber()
+        with pytest.raises(FileNotFoundError):
+            transcriber.transcribe_file_with_segments("/nonexistent/audio.wav")
+
+
+class TestNormalizeAudio:
+    def test_int16_audio_is_scaled(self):
+        transcriber = Transcriber()
+        audio = np.array([16384, -16384, 32767, -32768], dtype=np.int16)
+        out = transcriber._normalize_audio(audio)
+        assert out.dtype == np.float32
+        assert out.min() >= -1.0
+        assert out.max() <= 1.0
+
+    def test_float32_in_range_passthrough(self):
+        transcriber = Transcriber()
+        audio = np.array([0.5, -0.5, 0.0], dtype=np.float32)
+        out = transcriber._normalize_audio(audio)
+        assert out is audio  # No copy needed
+        assert out.dtype == np.float32
+
+
+class TestTranscribeMocked:
+    """Drive the wrapper with a mocked NeMo model."""
+
+    def _stub_model(self, transcriber: Transcriber, result: SimpleNamespace) -> MagicMock:
+        model = MagicMock()
+        model.transcribe.return_value = [result]
+        transcriber._model = model
+        return model
+
+    def test_transcribe_audio_returns_text(self):
+        transcriber = Transcriber()
+        self._stub_model(transcriber, _fake_result(text="  hello world  "))
+        audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
+        assert transcriber.transcribe_audio(audio) == "hello world"
+
+    def test_transcribe_audio_with_segments(self):
+        transcriber = Transcriber()
+        self._stub_model(
+            transcriber,
+            _fake_result(
+                text="hello world",
+                segments=[
+                    {"start": 0.0, "end": 0.5, "segment": "hello"},
+                    {"start": 0.5, "end": 1.0, "segment": "world"},
+                ],
+            ),
+        )
+        audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
+        segments = transcriber.transcribe_audio_with_segments(audio)
+        assert segments == [(0.0, 0.5, "hello"), (0.5, 1.0, "world")]
+
+    def test_segments_fallback_when_no_timestamps(self):
+        """If NeMo returns text but no segment stamps, emit a single span."""
+        transcriber = Transcriber()
+        self._stub_model(transcriber, _fake_result(text="bare text"))
+        audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
+        segments = transcriber.transcribe_audio_with_segments(audio)
+        assert segments == [(0.0, 0.0, "bare text")]
+
+    def test_transcribe_audio_with_words(self):
+        transcriber = Transcriber()
+        self._stub_model(
+            transcriber,
+            _fake_result(
+                text="hello world",
+                words=[
+                    {"start": 0.0, "end": 0.4, "word": "hello"},
+                    {"start": 0.5, "end": 0.9, "word": "world"},
+                ],
+            ),
+        )
+        audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
+        text, words = transcriber.transcribe_audio_with_words(audio)
+        assert text == "hello world"
+        assert words == [
+            ("hello", 0.0, 0.4, 1.0),
+            ("world", 0.5, 0.9, 1.0),
+        ]
+
+    def test_transcribe_partial(self):
+        transcriber = Transcriber()
+        self._stub_model(transcriber, _fake_result(text="partial"))
+        audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
+        assert transcriber.transcribe_partial(audio) == "partial"
+
+    def test_transcribe_stream_yields_segment_text(self):
+        transcriber = Transcriber()
+        self._stub_model(
+            transcriber,
+            _fake_result(
+                text="a b",
+                segments=[
+                    {"start": 0.0, "end": 0.1, "segment": "a"},
+                    {"start": 0.1, "end": 0.2, "segment": "b"},
+                ],
+            ),
+        )
+        audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
+        assert list(transcriber.transcribe_stream(audio)) == ["a", "b"]
+
+    def test_empty_results_raises(self):
+        transcriber = Transcriber()
+        model = MagicMock()
+        model.transcribe.return_value = []
+        transcriber._model = model
+        audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
+        with pytest.raises(RuntimeError, match="no results"):
+            transcriber.transcribe_audio(audio)
+
+    def test_unload_clears_model(self):
+        transcriber = Transcriber()
+        self._stub_model(transcriber, _fake_result())
+        transcriber.unload()
+        assert transcriber._model is None
+
+
+class TestSampleRateConstant:
+    def test_stt_sample_rate_is_16khz(self):
+        assert STT_SAMPLE_RATE == 16000

@@ -40,7 +40,7 @@ pytest tests/test_cli.py::test_name  # Single test
 ## Architecture
 
 voiced is a voice daemon for Wayland/Hyprland that provides both:
-- **STT (Speech-to-Text)**: Using faster-whisper for transcription
+- **STT (Speech-to-Text)**: Using NVIDIA Parakeet-TDT (NeMo) for transcription
 - **TTS (Text-to-Speech)**: Using VibeVoice for synthesis
 
 ### Component Flow
@@ -49,7 +49,7 @@ voiced is a voice daemon for Wayland/Hyprland that provides both:
 CLI Command → Unix Socket IPC → Daemon
                                   ├── Server (server.py) - Unix socket handler
                                   ├── Recorder (recorder.py) - sounddevice audio capture
-                                  ├── Transcriber (transcriber.py) - faster-whisper STT
+                                  ├── Transcriber (transcriber.py) - Parakeet-TDT STT
                                   ├── Synthesizer (synthesizer.py) - VibeVoice TTS
                                   ├── Injector (injector.py) - wl-clipboard text injection
                                   └── TrayIcon (tray.py) - D-Bus StatusNotifierItem
@@ -70,7 +70,7 @@ CLI Command → Unix Socket IPC → Daemon
 
 **IPC Protocol**: JSON over Unix domain socket at `~/.cache/voiced/control.sock`. Commands: `toggle`, `status`, `stop`.
 
-**GPU Detection**: Uses `ctranslate2.get_cuda_device_count()` for CUDA detection (not torch).
+**GPU Detection**: Uses `torch.cuda.is_available()` for CUDA detection (NeMo is torch-native).
 
 ### Config Locations
 

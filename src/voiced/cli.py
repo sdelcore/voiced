@@ -39,7 +39,7 @@ def main(ctx: click.Context, verbose: bool) -> None:
     """voiced - Voice Daemon for STT and TTS.
 
     A CLI application for speech-to-text (STT) and text-to-speech (TTS).
-    Uses faster-whisper for STT and VibeVoice for TTS.
+    Uses NVIDIA Parakeet-TDT (NeMo) for STT and VibeVoice for TTS.
     Designed for Hyprland/Wayland with hotkey support.
 
     \b
@@ -571,7 +571,7 @@ def _transcribe_local(
     """Transcribe using local model."""
     from voiced.transcriber import Transcriber
 
-    transcriber = Transcriber(config.transcription, vad_config=config.vad)
+    transcriber = Transcriber(config.transcription)
 
     if annotate:
         from voiced.diarizer import (

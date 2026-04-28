@@ -23,7 +23,7 @@ logger = logging.getLogger(__name__)
 
 # Sample rates
 WEBRTC_SAMPLE_RATE = 48000
-WHISPER_SAMPLE_RATE = 16000
+STT_SAMPLE_RATE = 16000
 TTS_SAMPLE_RATE = 24000
 
 # Audio settings
