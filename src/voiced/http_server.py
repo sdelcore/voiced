@@ -224,7 +224,6 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             return
 
         query_params = parse_qs(query_string)
-        language = query_params.get("language", [None])[0]
         identify_speakers_param = query_params.get("identify_speakers", ["true"])[0]
         identify_speakers = identify_speakers_param.lower() == "true"
         profiles_path = query_params.get("profiles_path", [None])[0]
@@ -309,14 +308,9 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         logger.info(f"Transcribing {duration:.1f}s of audio at {sample_rate}Hz")
 
         try:
-            original_language = self.transcriber.config.language
-            if language:
-                self.transcriber.config.language = language
-
             start_time = time.time()
 
-            # Use transcribe method that returns segments with info
-            segments_raw, info = self._transcribe_with_info(audio, sample_rate)
+            segments_raw = self._transcribe(audio, sample_rate)
 
             # Build full text from segments
             full_text = " ".join(text for _, _, text in segments_raw)
@@ -386,9 +380,6 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
 
             elapsed = time.time() - start_time
 
-            if language:
-                self.transcriber.config.language = original_language
-
             TranscriptionHandler.request_count += 1
 
             self._send_json(
@@ -396,8 +387,6 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
                 {
                     "text": full_text,
                     "duration": round(duration, 2),
-                    "language": info.language,
-                    "language_probability": round(info.language_probability, 2),
                     "processing_time": round(elapsed, 2),
                     "model": self.transcriber.config.model,
                     "segments": segments_output,
@@ -407,29 +396,11 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             logger.exception(f"Transcription failed: {e}")
             self._send_error_json(500, f"Transcription failed: {e}", "TRANSCRIPTION_ERROR")
 
-    def _transcribe_with_info(
+    def _transcribe(
         self, audio: np.ndarray, sample_rate: int
-    ) -> tuple[list[tuple[float, float, str]], any]:
-        """Transcribe audio and return segments with info object."""
-        audio = self.transcriber._normalize_audio(audio)
-        logger.info(f"Transcribing audio with segments: {len(audio)} samples at {sample_rate}Hz")
-
-        segments, info = self.transcriber.model.transcribe(
-            audio,
-            language=self.transcriber.config.language,
-            beam_size=5,
-            **self.transcriber._get_vad_kwargs(),
-        )
-
-        logger.info(
-            f"Detected language: {info.language} (probability: {info.language_probability:.2f})"
-        )
-
-        result = []
-        for segment in segments:
-            result.append((segment.start, segment.end, segment.text.strip()))
-
-        return result, info
+    ) -> list[tuple[float, float, str]]:
+        """Transcribe audio and return (start, end, text) segments."""
+        return self.transcriber.transcribe_audio_with_segments(audio, sample_rate)
 
     def _handle_list_profiles(self) -> None:
         """Handle GET /profiles - list all profiles."""
@@ -738,7 +709,6 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         Each chunk is a raw PCM frame (24kHz, mono, int16).
         """
         import queue
-        import struct
         import threading
 
         # Check if TTS is enabled
@@ -985,7 +955,7 @@ class TranscriptionServer:
         self.config = config or load_config()
         self.host = host or self.config.server.host
         self.port = port or self.config.server.port
-        self.transcriber = Transcriber(self.config.transcription, vad_config=self.config.vad)
+        self.transcriber = Transcriber(self.config.transcription)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._running = False

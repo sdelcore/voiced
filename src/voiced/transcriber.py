@@ -1,38 +1,35 @@
-"""Transcription engine using faster-whisper."""
+"""Transcription engine using NVIDIA Parakeet-TDT (NeMo)."""
 
 import logging
 from collections.abc import Generator
 from pathlib import Path
+from typing import Any
 
 import numpy as np
-from faster_whisper import WhisperModel
 
-from voiced.config import TranscriptionConfig, VadConfig
+from voiced.config import TranscriptionConfig
 
 logger = logging.getLogger(__name__)
 
+STT_SAMPLE_RATE = 16000
+
 
 class Transcriber:
-    """Wrapper around faster-whisper for speech-to-text transcription."""
+    """Wrapper around NeMo Parakeet-TDT for speech-to-text transcription."""
 
-    def __init__(
-        self,
-        config: TranscriptionConfig | None = None,
-        vad_config: VadConfig | None = None,
-    ):
+    def __init__(self, config: TranscriptionConfig | None = None):
         """Initialize the transcriber.
 
         Args:
             config: Transcription configuration. Uses defaults if not provided.
-            vad_config: VAD configuration. Uses defaults if not provided.
         """
         self.config = config or TranscriptionConfig()
-        self.vad_config = vad_config or VadConfig()
-        self._model: WhisperModel | None = None
+        self._model: Any = None
+        self._device: str | None = None
 
     @property
-    def model(self) -> WhisperModel:
-        """Lazy-load the whisper model."""
+    def model(self) -> Any:
+        """Lazy-load the Parakeet model."""
         if self._model is None:
             self._model = self._load_model()
         return self._model
@@ -42,39 +39,28 @@ class Transcriber:
         if self.config.device != "auto":
             return self.config.device
 
-        import ctranslate2
+        import torch
 
-        if ctranslate2.get_cuda_device_count() > 0:
+        if torch.cuda.is_available():
             logger.info("CUDA available, using GPU")
             return "cuda"
 
         logger.info("Using CPU for transcription")
         return "cpu"
 
-    def _get_compute_type(self, device: str) -> str:
-        """Determine the compute type based on device."""
-        if self.config.compute_type != "auto":
-            return self.config.compute_type
+    def _load_model(self) -> Any:
+        """Load the Parakeet ASR model from HuggingFace via NeMo."""
+        import nemo.collections.asr as nemo_asr
 
-        # Auto-select based on device
-        if device == "cuda":
-            return "float16"
-        return "int8"
-
-    def _load_model(self) -> WhisperModel:
-        """Load the faster-whisper model."""
         device = self._get_device()
-        compute_type = self._get_compute_type(device)
+        self._device = device
 
-        logger.info(
-            f"Loading model '{self.config.model}' on {device} with compute_type={compute_type}"
-        )
+        logger.info(f"Loading model '{self.config.model}' on {device}")
 
-        return WhisperModel(
-            self.config.model,
-            device=device,
-            compute_type=compute_type,
-        )
+        model = nemo_asr.models.ASRModel.from_pretrained(model_name=self.config.model)
+        model = model.to(device)
+        model.eval()
+        return model
 
     def _normalize_audio(self, audio: np.ndarray) -> np.ndarray:
         """Normalize audio to float32 in [-1, 1] range."""
@@ -84,231 +70,124 @@ class Transcriber:
             audio = audio / 32768.0
         return audio
 
-    def _get_vad_kwargs(self) -> dict:
-        """Build VAD arguments for model.transcribe() based on config."""
-        if not self.vad_config.enabled:
-            return {"vad_filter": False}
-
-        return {
-            "vad_filter": True,
-            "vad_parameters": {
-                "threshold": self.vad_config.threshold,
-                "min_silence_duration_ms": self.vad_config.min_silence_duration_ms,
-                "speech_pad_ms": self.vad_config.speech_pad_ms,
-                "min_speech_duration_ms": self.vad_config.min_speech_duration_ms,
-            },
-        }
+    def _run(self, source: Any, *, timestamps: bool = False) -> Any:
+        """Run the model and return the first result."""
+        results = self.model.transcribe([source], timestamps=timestamps)
+        if not results:
+            raise RuntimeError("Parakeet returned no results")
+        return results[0]
 
     def transcribe_file(self, audio_path: str | Path) -> str:
-        """Transcribe an audio file.
-
-        Args:
-            audio_path: Path to the audio file.
-
-        Returns:
-            The transcribed text.
-        """
+        """Transcribe an audio file."""
         audio_path = Path(audio_path)
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
         logger.info(f"Transcribing file: {audio_path}")
-
-        segments, info = self.model.transcribe(
-            str(audio_path),
-            language=self.config.language,
-            beam_size=5,
-            **self._get_vad_kwargs(),
-        )
-
-        logger.info(
-            f"Detected language: {info.language} (probability: {info.language_probability:.2f})"
-        )
-
-        # Collect all segments into a single string
-        text_parts = []
-        for segment in segments:
-            text_parts.append(segment.text.strip())
-
-        return " ".join(text_parts)
+        result = self._run(str(audio_path))
+        return (result.text or "").strip()
 
     def transcribe_file_with_segments(
         self, audio_path: str | Path
     ) -> list[tuple[float, float, str]]:
-        """Transcribe an audio file and return segments with timestamps.
-
-        Args:
-            audio_path: Path to the audio file.
-
-        Returns:
-            List of (start, end, text) tuples.
-        """
+        """Transcribe an audio file and return segments with timestamps."""
         audio_path = Path(audio_path)
         if not audio_path.exists():
             raise FileNotFoundError(f"Audio file not found: {audio_path}")
 
         logger.info(f"Transcribing file with segments: {audio_path}")
-
-        segments, info = self.model.transcribe(
-            str(audio_path),
-            language=self.config.language,
-            beam_size=5,
-            **self._get_vad_kwargs(),
-        )
-
-        logger.info(
-            f"Detected language: {info.language} (probability: {info.language_probability:.2f})"
-        )
-
-        result = []
-        for segment in segments:
-            result.append((segment.start, segment.end, segment.text.strip()))
-
-        return result
+        result = self._run(str(audio_path), timestamps=True)
+        return _segments_from_result(result)
 
     def transcribe_audio_with_segments(
         self,
         audio: np.ndarray,
-        sample_rate: int = 16000,
+        sample_rate: int = STT_SAMPLE_RATE,
     ) -> list[tuple[float, float, str]]:
-        """Transcribe audio array and return segments with timestamps.
-
-        Args:
-            audio: Audio data as numpy array (float32, mono).
-            sample_rate: Sample rate of the audio (default: 16000).
-
-        Returns:
-            List of (start, end, text) tuples.
-        """
+        """Transcribe audio array and return segments with timestamps."""
         audio = self._normalize_audio(audio)
         logger.info(f"Transcribing audio with segments: {len(audio)} samples at {sample_rate}Hz")
-
-        segments, info = self.model.transcribe(
-            audio,
-            language=self.config.language,
-            beam_size=5,
-            **self._get_vad_kwargs(),
-        )
-
-        logger.info(
-            f"Detected language: {info.language} (probability: {info.language_probability:.2f})"
-        )
-
-        result = []
-        for segment in segments:
-            result.append((segment.start, segment.end, segment.text.strip()))
-
-        return result
+        result = self._run(audio, timestamps=True)
+        return _segments_from_result(result)
 
     def transcribe_audio(
         self,
         audio: np.ndarray,
-        sample_rate: int = 16000,
-        initial_prompt: str | None = None,
+        sample_rate: int = STT_SAMPLE_RATE,
     ) -> str:
-        """Transcribe audio from a numpy array.
-
-        Args:
-            audio: Audio data as a numpy array (float32, mono).
-            sample_rate: Sample rate of the audio (default: 16000).
-            initial_prompt: Optional context from previous transcription.
-
-        Returns:
-            The transcribed text.
-        """
+        """Transcribe audio from a numpy array."""
         audio = self._normalize_audio(audio)
         logger.info(f"Transcribing audio buffer: {len(audio)} samples at {sample_rate}Hz")
-
-        segments, info = self.model.transcribe(
-            audio,
-            language=self.config.language,
-            beam_size=5,
-            initial_prompt=initial_prompt,
-            **self._get_vad_kwargs(),
-        )
-
-        logger.info(
-            f"Detected language: {info.language} (probability: {info.language_probability:.2f})"
-        )
-
-        # Collect all segments into a single string
-        text_parts = []
-        for segment in segments:
-            text_parts.append(segment.text.strip())
-
-        return " ".join(text_parts)
+        result = self._run(audio)
+        return (result.text or "").strip()
 
     def transcribe_audio_with_words(
         self,
         audio: np.ndarray,
-        sample_rate: int = 16000,
-        initial_prompt: str | None = None,
-        beam_size: int = 1,
+        sample_rate: int = STT_SAMPLE_RATE,
     ) -> tuple[str, list[tuple[str, float, float, float]]]:
         """Transcribe audio with word-level timestamps for streaming.
 
-        Args:
-            audio: Audio data as a numpy array (float32, mono).
-            sample_rate: Sample rate of the audio (default: 16000).
-            initial_prompt: Optional context from previous transcription.
-            beam_size: Beam size for decoding (1 = greedy, faster).
-
-        Returns:
-            Tuple of (full_text, list of (word, start, end, probability) tuples).
+        Returns (text, [(word, start, end, probability)]).  Parakeet does not emit
+        per-word probabilities; 1.0 is returned in that slot.
         """
         audio = self._normalize_audio(audio)
         logger.debug(f"Transcribing with words: {len(audio)} samples at {sample_rate}Hz")
+        result = self._run(audio, timestamps=True)
 
-        segments, info = self.model.transcribe(
-            audio,
-            language=self.config.language,
-            beam_size=beam_size,
-            word_timestamps=True,
-            initial_prompt=initial_prompt,
-            **self._get_vad_kwargs(),
-        )
+        text = (result.text or "").strip()
+        words: list[tuple[str, float, float, float]] = []
+        for stamp in _word_stamps(result):
+            words.append((stamp["word"], float(stamp["start"]), float(stamp["end"]), 1.0))
+        return text, words
 
-        logger.debug(
-            f"Detected language: {info.language} (probability: {info.language_probability:.2f})"
-        )
-
-        text_parts = []
-        all_words = []
-
-        for segment in segments:
-            text_parts.append(segment.text.strip())
-            if segment.words:
-                for word in segment.words:
-                    all_words.append((word.word, word.start, word.end, word.probability))
-
-        return " ".join(text_parts), all_words
+    def transcribe_partial(self, audio: np.ndarray) -> str:
+        """Fast partial transcription for streaming use cases."""
+        audio = self._normalize_audio(audio)
+        result = self._run(audio)
+        return (result.text or "").strip()
 
     def transcribe_stream(
-        self, audio: np.ndarray, sample_rate: int = 16000
+        self, audio: np.ndarray, sample_rate: int = STT_SAMPLE_RATE
     ) -> Generator[str, None, None]:
-        """Transcribe audio and yield segments as they are generated.
+        """Yield text per detected segment.
 
-        Args:
-            audio: Audio data as a numpy array (float32, mono).
-            sample_rate: Sample rate of the audio (default: 16000).
-
-        Yields:
-            Transcribed text segments.
+        Parakeet's inference is non-streaming; we yield each timestamped segment
+        once the full transcription completes.
         """
-        audio = self._normalize_audio(audio)
-        segments, _ = self.model.transcribe(
-            audio,
-            language=self.config.language,
-            beam_size=5,
-            **self._get_vad_kwargs(),
-        )
-
-        for segment in segments:
-            yield segment.text.strip()
+        for _start, _end, text in self.transcribe_audio_with_segments(audio, sample_rate):
+            yield text
 
     def unload(self) -> None:
         """Unload the model to free memory."""
         if self._model is not None:
+            import torch
+
             del self._model
             self._model = None
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             logger.info("Model unloaded")
+
+
+def _segments_from_result(result: Any) -> list[tuple[float, float, str]]:
+    """Extract (start, end, text) tuples from a NeMo transcription result."""
+    timestamp = getattr(result, "timestamp", None) or {}
+    segments = timestamp.get("segment") or []
+    out: list[tuple[float, float, str]] = []
+    for seg in segments:
+        text = (seg.get("segment") or seg.get("text") or "").strip()
+        if not text:
+            continue
+        out.append((float(seg["start"]), float(seg["end"]), text))
+
+    if not out and getattr(result, "text", None):
+        # Model returned text without segment timestamps — emit a single span.
+        out.append((0.0, 0.0, result.text.strip()))
+    return out
+
+
+def _word_stamps(result: Any) -> list[dict]:
+    """Extract word-level timestamps from a NeMo transcription result."""
+    timestamp = getattr(result, "timestamp", None) or {}
+    return timestamp.get("word") or []

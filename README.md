@@ -10,7 +10,7 @@ A voice daemon for Linux/Wayland providing both **Speech-to-Text (STT)** and **T
 - **Client-server mode** - run transcription on a remote GPU server
 - System tray integration with modern icons
 - GPU acceleration with CPU fallback
-- Multiple Whisper models (tiny to large-v3)
+- NVIDIA Parakeet-TDT v3 backend (low WER, hallucination-resistant on silence)
 - Audio feedback on start/stop
 - Clipboard text injection
 - File transcription with timestamps
@@ -219,10 +219,9 @@ Configuration file: `~/.config/voiced/config.toml`
 
 ```toml
 [transcription]
-model = "base"           # tiny, base, small, medium, large-v3
+model = "nvidia/parakeet-tdt-0.6b-v3"  # NeMo ASRModel HF id
 device = "auto"          # auto, cuda, cpu
-compute_type = "auto"    # auto, float16, int8, float32
-language = "en"
+language = "en"          # advisory only; Parakeet TDT v3 auto-detects
 
 [audio]
 sample_rate = 16000
@@ -371,15 +370,13 @@ audio = recorder.stop()  # Returns numpy array
 
 ## Models
 
-### STT Models (faster-whisper)
+### STT Models (NVIDIA NeMo)
 
-| Model | Size | Speed | Accuracy |
-|-------|------|-------|----------|
-| tiny | ~75MB | Fastest | Lower |
-| base | ~150MB | Fast | Good |
-| small | ~500MB | Medium | Better |
-| medium | ~1.5GB | Slower | High |
-| large-v3 | ~3GB | Slowest | Highest |
+| Model | Params | Notes |
+|-------|--------|-------|
+| `nvidia/parakeet-tdt-0.6b-v3` | 600M | Default. 25 European languages, auto-detect, WER 6.3% on Open ASR |
+| `nvidia/parakeet-tdt-0.6b-v2` | 600M | Prior version, English-only |
+| `nvidia/canary-1b-v2` | 1B | Multilingual + AST when accuracy matters more than speed |
 
 ### TTS Model (VibeVoice)
 
@@ -395,7 +392,7 @@ Available voices: `carter`, `davis`, `emma`, `frank`, `grace`, `mike`
 ```
 CLI (voiced toggle) → Unix Socket → Daemon
                                      ├── Recorder (sounddevice)
-                                     ├── Transcriber (faster-whisper)
+                                     ├── Transcriber (Parakeet-TDT)
                                      ├── Injector (wl-clipboard)
                                      └── Tray Icon (D-Bus SNI)
 ```
@@ -404,7 +401,7 @@ CLI (voiced toggle) → Unix Socket → Daemon
 ```
 CLI (voiced toggle) → Unix Socket → Daemon
                                      ├── Recorder (sounddevice)
-                                     ├── Transcriber (faster-whisper) ←─┐
+                                     ├── Transcriber (Parakeet-TDT) ←───┐
                                      ├── Synthesizer (VibeVoice) ←──────┤ shared
                                      ├── Injector (wl-clipboard)        │
                                      ├── Tray Icon (D-Bus SNI)          │

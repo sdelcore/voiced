@@ -1,12 +1,12 @@
 [project]
 name = "voiced"
-version = "0.2.0"
+version = "0.3.0"
 description = "Voice daemon - Speech-to-Text and Text-to-Speech for Linux/Wayland"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "sdelcore" }]
-keywords = ["speech-to-text", "text-to-speech", "whisper", "tts", "stt", "transcription", "speaker-identification", "faster-whisper", "vibevoice", "daemon", "wayland"]
+keywords = ["speech-to-text", "text-to-speech", "parakeet", "nemo", "tts", "stt", "transcription", "speaker-identification", "vibevoice", "daemon", "wayland"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -22,8 +22,14 @@ classifiers = [
 ]
 
 dependencies = [
-    # STT dependencies
-    "faster-whisper>=1.0.0",
+    # STT (NVIDIA Parakeet-TDT via NeMo)
+    "nemo_toolkit[asr]>=2.4",
+    # Match the host driver (CUDA 12.8 on nightman). Default PyPI ships
+    # torch built against CUDA 13, which won't init on a 570.x driver.
+    # Override via [tool.uv.sources] below; pin all three together so
+    # uv doesn't keep a cached cu130 torchaudio with a cu128 torch.
+    "torch==2.9.1",
+    "torchaudio==2.9.1",
     "speechbrain>=1.0.0,<1.1.0",
     # TTS dependencies (VibeVoice installed separately)
     "tqdm>=4.65.0",
@@ -61,6 +67,15 @@ build-backend = "hatchling.build"
 [tool.hatch.build.targets.wheel]
 packages = ["src/voiced"]
 
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchaudio = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
 [tool.ruff]
 line-length = 100
 target-version = "py310"
@@ -71,3 +86,7 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: end-to-end test that downloads models and runs them on real audio (slow, GPU-heavy; opt in with `pytest -m integration`)",
+]

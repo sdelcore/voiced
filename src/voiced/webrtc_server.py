@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 
 # Sample rates
 WEBRTC_SAMPLE_RATE = 48000
-WHISPER_SAMPLE_RATE = 16000
+STT_SAMPLE_RATE = 16000
 TTS_SAMPLE_RATE = 24000
 
 # Audio frame settings
@@ -81,7 +81,7 @@ class AudioBufferTrack(MediaStreamTrack):
             audio_48k = np.concatenate(self._buffer)
             self._buffer = []
         logger.info(f"STT recording stopped: {len(audio_48k)} samples at 48kHz")
-        return resample_audio(audio_48k, WEBRTC_SAMPLE_RATE, WHISPER_SAMPLE_RATE)
+        return resample_audio(audio_48k, WEBRTC_SAMPLE_RATE, STT_SAMPLE_RATE)
 
     def get_buffer_duration(self) -> float:
         """Get current buffer duration in seconds."""
@@ -94,7 +94,7 @@ class AudioBufferTrack(MediaStreamTrack):
             if not self._buffer:
                 return np.array([], dtype=np.float32)
             audio_48k = np.concatenate(self._buffer)
-        return resample_audio(audio_48k, WEBRTC_SAMPLE_RATE, WHISPER_SAMPLE_RATE)
+        return resample_audio(audio_48k, WEBRTC_SAMPLE_RATE, STT_SAMPLE_RATE)
 
     async def recv(self) -> AudioFrame:
         """Receive is not used for input track."""
@@ -465,7 +465,7 @@ class WebRTCConnectionManager:
                 break
 
             audio = session.stt_track.get_partial_audio()
-            if len(audio) < WHISPER_SAMPLE_RATE:  # Less than 1 second
+            if len(audio) < STT_SAMPLE_RATE:  # Less than 1 second
                 continue
 
             try:
@@ -492,13 +492,7 @@ class WebRTCConnectionManager:
         if not self.transcriber:
             return ""
 
-        segments, _ = self.transcriber.model.transcribe(
-            audio,
-            language=self.transcriber.config.language,
-            beam_size=1,  # Fast greedy decoding for partials
-            vad_filter=True,
-        )
-        return " ".join(seg.text.strip() for seg in segments)
+        return self.transcriber.transcribe_partial(audio)
 
     async def _stop_stt(self, session: WebRTCSession) -> None:
         """Stop STT recording and return final transcription."""
@@ -518,7 +512,7 @@ class WebRTCConnectionManager:
 
         audio = session.stt_track.stop_recording()
 
-        if len(audio) < WHISPER_SAMPLE_RATE // 2:  # Less than 0.5 seconds
+        if len(audio) < STT_SAMPLE_RATE // 2:  # Less than 0.5 seconds
             await session.send_message({
                 "type": "stt_final",
                 "text": "",
@@ -546,7 +540,7 @@ class WebRTCConnectionManager:
             return {"text": "", "segments": []}
 
         segments = self.transcriber.transcribe_audio_with_segments(
-            audio, sample_rate=WHISPER_SAMPLE_RATE
+            audio, sample_rate=STT_SAMPLE_RATE
         )
 
         # Build result
@@ -565,7 +559,7 @@ class WebRTCConnectionManager:
             try:
                 identified = self.speaker_identifier.identify_segments_from_array(
                     audio,
-                    WHISPER_SAMPLE_RATE,
+                    STT_SAMPLE_RATE,
                     [(s["start"], s["end"], s["text"]) for s in result_segments],
                 )
                 for i, seg in enumerate(identified):
@@ -713,8 +707,8 @@ class WebRTCConnectionManager:
                 audio = audio / 32768.0
 
             # Resample to 16kHz if needed
-            if sample_rate != WHISPER_SAMPLE_RATE:
-                audio = resample_audio(audio, sample_rate, WHISPER_SAMPLE_RATE)
+            if sample_rate != STT_SAMPLE_RATE:
+                audio = resample_audio(audio, sample_rate, STT_SAMPLE_RATE)
 
             # Run transcription
             config = STTConfig(

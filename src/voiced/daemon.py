@@ -372,9 +372,7 @@ class Daemon:
 
         try:
             if self._transcriber is None:
-                self._transcriber = Transcriber(
-                    self.config.transcription, vad_config=self.config.vad
-                )
+                self._transcriber = Transcriber(self.config.transcription)
 
             text = self._transcriber.transcribe_audio(
                 job.audio_data,
@@ -485,7 +483,7 @@ class Daemon:
 
             # Pre-load model (optional, speeds up first transcription)
             logger.info("Pre-loading transcription model...")
-            self._transcriber = Transcriber(self.config.transcription, vad_config=self.config.vad)
+            self._transcriber = Transcriber(self.config.transcription)
             _ = self._transcriber.model  # Trigger model load
             logger.info("Model loaded")
 

@@ -1,7 +1,7 @@
 """voiced - Voice Daemon.
 
 A Python library for speech-to-text (STT) and text-to-speech (TTS) for Linux/Wayland.
-Uses faster-whisper for STT and VibeVoice for TTS, with optional speaker identification.
+Uses NVIDIA Parakeet-TDT (NeMo) for STT and VibeVoice for TTS, with optional speaker identification.
 
 Basic STT usage:
     from voiced import Transcriber, TranscriptionConfig
@@ -23,7 +23,7 @@ With speaker identification:
         print(f"[{seg.start:.1f}-{seg.end:.1f}] {seg.speaker}: {seg.text}")
 """
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 # Core transcription
 # Configuration classes
