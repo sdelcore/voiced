@@ -12,6 +12,9 @@
         pkgs = nixpkgs.legacyPackages.${system};
         python = pkgs.python312;
 
+        # Single source of truth: pyproject.toml.
+        voicedVersion = (pkgs.lib.importTOML ./pyproject.toml).project.version;
+
         # Runtime dependencies
         runtimeDeps = with pkgs; [
           portaudio
@@ -56,7 +59,7 @@
         # Source bundle for installation
         voicedSrc = pkgs.stdenv.mkDerivation {
           pname = "voiced-src";
-          version = "0.3.0";
+          version = voicedVersion;
           src = ./.;
           phases = [ "installPhase" ];
           installPhase = ''
@@ -72,7 +75,7 @@
           VOICED_HOME="''${XDG_DATA_HOME:-$HOME/.local/share}/voiced"
           VENV_DIR="$VOICED_HOME/venv"
           VERSION_FILE="$VENV_DIR/.version"
-          CURRENT_VERSION="0.3.0"
+          CURRENT_VERSION="${voicedVersion}"
           SOURCE_DIR="${voicedSrc}"
 
           export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath runtimeDeps}:''${LD_LIBRARY_PATH:-}"

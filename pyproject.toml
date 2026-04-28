@@ -71,3 +71,7 @@ select = ["E", "F", "I", "N", "W", "UP"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]
+addopts = "-m 'not integration'"
+markers = [
+    "integration: end-to-end test that downloads models and runs them on real audio (slow, GPU-heavy; opt in with `pytest -m integration`)",
+]
