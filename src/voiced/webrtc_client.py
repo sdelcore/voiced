@@ -2,12 +2,10 @@
 
 import asyncio
 import base64
-import io
 import json
 import logging
 import queue
 import threading
-import wave
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -18,6 +16,8 @@ import sounddevice as sd
 from aiortc import MediaStreamTrack, RTCPeerConnection, RTCSessionDescription
 from av import AudioFrame
 from scipy import signal
+
+from voiced.audio_codec import audio_to_wav
 
 logger = logging.getLogger(__name__)
 
@@ -417,9 +417,7 @@ class WebRTCClient:
         except json.JSONDecodeError:
             logger.warning(f"Invalid JSON message: {message}")
 
-    async def start_stt(
-        self, language: str | None = None, identify_speakers: bool = False
-    ) -> None:
+    async def start_stt(self, language: str | None = None, identify_speakers: bool = False) -> None:
         """Start STT recording."""
         if not self._connected or not self._data_channel:
             raise RuntimeError("Not connected")
@@ -485,7 +483,7 @@ class WebRTCClient:
             raise RuntimeError("Not connected")
 
         # Convert audio to WAV bytes
-        wav_bytes = self._audio_to_wav(audio, sample_rate)
+        wav_bytes = audio_to_wav(audio, sample_rate)
         audio_b64 = base64.b64encode(wav_bytes).decode("ascii")
 
         self._stt_result = asyncio.get_event_loop().create_future()
@@ -502,25 +500,6 @@ class WebRTCClient:
         logger.info("Batch transcription started")
 
         return await self._stt_result
-
-    def _audio_to_wav(self, audio: np.ndarray, sample_rate: int) -> bytes:
-        """Convert numpy audio array to WAV bytes."""
-        buffer = io.BytesIO()
-
-        # Normalize to [-1, 1] if needed
-        if audio.max() > 1.0 or audio.min() < -1.0:
-            audio = audio / 32768.0
-
-        # Convert to int16
-        audio_int16 = (audio * 32767).astype(np.int16)
-
-        with wave.open(buffer, "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)
-            wav.setframerate(sample_rate)
-            wav.writeframes(audio_int16.tobytes())
-
-        return buffer.getvalue()
 
     async def disconnect(self) -> None:
         """Disconnect from server."""
@@ -581,6 +560,7 @@ class SyncWebRTCClient:
         # Wait for loop to be ready
         while self._loop is None:
             import time
+
             time.sleep(0.01)
 
         # Create client and connect
@@ -588,9 +568,7 @@ class SyncWebRTCClient:
         future = asyncio.run_coroutine_threadsafe(self._client.connect(), self._loop)
         future.result(timeout=30.0)
 
-    def start_stt(
-        self, language: str | None = None, identify_speakers: bool = False
-    ) -> None:
+    def start_stt(self, language: str | None = None, identify_speakers: bool = False) -> None:
         """Start STT recording."""
         if not self._client or not self._loop:
             raise RuntimeError("Not connected")

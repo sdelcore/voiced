@@ -10,6 +10,7 @@ from dataclasses import dataclass
 import numpy as np
 import torch
 
+from voiced.device import resolve_device_config
 from voiced.voice_manager import VoiceManager
 
 logger = logging.getLogger(__name__)
@@ -46,16 +47,6 @@ def check_vibevoice_installed() -> bool:
         )
     except ImportError:
         return False
-
-
-def get_device_and_dtype() -> tuple[str, torch.dtype, str]:
-    """Determine the best device and dtype for the current system."""
-    if torch.cuda.is_available():
-        return "cuda", torch.bfloat16, "flash_attention_2"
-    elif hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
-        return "mps", torch.float32, "sdpa"
-    else:
-        return "cpu", torch.float32, "sdpa"
 
 
 class Synthesizer:
@@ -100,21 +91,10 @@ class Synthesizer:
             VibeVoiceStreamingProcessor,
         )
 
-        # Determine device
-        if self.config.device == "auto":
-            self._device, self._dtype, self._attn_impl = get_device_and_dtype()
-        elif self.config.device == "cuda":
-            self._device = "cuda"
-            self._dtype = torch.bfloat16
-            self._attn_impl = "flash_attention_2"
-        elif self.config.device == "mps":
-            self._device = "mps"
-            self._dtype = torch.float32
-            self._attn_impl = "sdpa"
-        else:
-            self._device = "cpu"
-            self._dtype = torch.float32
-            self._attn_impl = "sdpa"
+        device_cfg = resolve_device_config(self.config.device)
+        self._device = device_cfg.device
+        self._dtype = device_cfg.dtype
+        self._attn_impl = device_cfg.attn_impl
 
         logger.info(f"Loading TTS processor from {self.config.model_path}...")
         self.processor = VibeVoiceStreamingProcessor.from_pretrained(self.config.model_path)
