@@ -10,10 +10,18 @@ import numpy as np
 from voiced.audio_codec import normalize_audio
 from voiced.config import TranscriptionConfig
 from voiced.device import resolve_device_config
+from voiced.model_host import ModelHost
 
 logger = logging.getLogger(__name__)
 
 STT_SAMPLE_RATE = 16000
+
+
+def _empty_cuda_cache(_model: Any) -> None:
+    import torch
+
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 class Transcriber:
@@ -26,20 +34,22 @@ class Transcriber:
             config: Transcription configuration. Uses defaults if not provided.
         """
         self.config = config or TranscriptionConfig()
-        self._model: Any = None
         self._device: str | None = None
-
-    @property
-    def model(self) -> Any:
-        """Lazy-load the Parakeet model."""
-        if self._model is None:
-            self._model = self._load_model()
-        return self._model
+        self._host: ModelHost[Any] = ModelHost(
+            loader=self._load_model,
+            on_unload=_empty_cuda_cache,
+            name=f"parakeet({self.config.model})",
+        )
 
     @property
     def device(self) -> str:
         """The device the model runs on. Resolved without loading if not yet loaded."""
         return self._device or resolve_device_config(self.config.device).device
+
+    def warmup(self) -> None:
+        """Force model load. Useful for triggering load outside a transcribe call."""
+        with self._host.use():
+            pass
 
     def _load_model(self) -> Any:
         """Load the Parakeet ASR model from HuggingFace via NeMo."""
@@ -57,7 +67,8 @@ class Transcriber:
 
     def _run(self, source: Any, *, timestamps: bool = False) -> Any:
         """Run the model and return the first result."""
-        results = self.model.transcribe([source], timestamps=timestamps)
+        with self._host.use() as model:
+            results = model.transcribe([source], timestamps=timestamps)
         if not results:
             raise RuntimeError("Parakeet returned no results")
         return results[0]
@@ -144,15 +155,9 @@ class Transcriber:
             yield text
 
     def unload(self) -> None:
-        """Unload the model to free memory."""
-        if self._model is not None:
-            import torch
-
-            del self._model
-            self._model = None
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-            logger.info("Model unloaded")
+        """Unload the model to free memory. No-op if not loaded."""
+        self._host.unload()
+        self._device = None
 
 
 def _segments_from_result(result: Any) -> list[tuple[float, float, str]]:

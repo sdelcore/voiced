@@ -484,7 +484,7 @@ class Daemon:
             # Pre-load model (optional, speeds up first transcription)
             logger.info("Pre-loading transcription model...")
             self._transcriber = Transcriber(self.config.transcription)
-            _ = self._transcriber.model  # Trigger model load
+            self._transcriber.warmup()
             logger.info("Model loaded")
 
             # Start background transcription worker
