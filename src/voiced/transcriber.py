@@ -7,7 +7,9 @@ from typing import Any
 
 import numpy as np
 
+from voiced.audio_codec import normalize_audio
 from voiced.config import TranscriptionConfig
+from voiced.device import resolve_device_config
 
 logger = logging.getLogger(__name__)
 
@@ -34,25 +36,16 @@ class Transcriber:
             self._model = self._load_model()
         return self._model
 
-    def _get_device(self) -> str:
-        """Determine the device to use for transcription."""
-        if self.config.device != "auto":
-            return self.config.device
-
-        import torch
-
-        if torch.cuda.is_available():
-            logger.info("CUDA available, using GPU")
-            return "cuda"
-
-        logger.info("Using CPU for transcription")
-        return "cpu"
+    @property
+    def device(self) -> str:
+        """The device the model runs on. Resolved without loading if not yet loaded."""
+        return self._device or resolve_device_config(self.config.device).device
 
     def _load_model(self) -> Any:
         """Load the Parakeet ASR model from HuggingFace via NeMo."""
         import nemo.collections.asr as nemo_asr
 
-        device = self._get_device()
+        device = resolve_device_config(self.config.device).device
         self._device = device
 
         logger.info(f"Loading model '{self.config.model}' on {device}")
@@ -61,14 +54,6 @@ class Transcriber:
         model = model.to(device)
         model.eval()
         return model
-
-    def _normalize_audio(self, audio: np.ndarray) -> np.ndarray:
-        """Normalize audio to float32 in [-1, 1] range."""
-        if audio.dtype != np.float32:
-            audio = audio.astype(np.float32)
-        if audio.max() > 1.0 or audio.min() < -1.0:
-            audio = audio / 32768.0
-        return audio
 
     def _run(self, source: Any, *, timestamps: bool = False) -> Any:
         """Run the model and return the first result."""
@@ -105,7 +90,7 @@ class Transcriber:
         sample_rate: int = STT_SAMPLE_RATE,
     ) -> list[tuple[float, float, str]]:
         """Transcribe audio array and return segments with timestamps."""
-        audio = self._normalize_audio(audio)
+        audio = normalize_audio(audio)
         logger.info(f"Transcribing audio with segments: {len(audio)} samples at {sample_rate}Hz")
         result = self._run(audio, timestamps=True)
         return _segments_from_result(result)
@@ -116,7 +101,7 @@ class Transcriber:
         sample_rate: int = STT_SAMPLE_RATE,
     ) -> str:
         """Transcribe audio from a numpy array."""
-        audio = self._normalize_audio(audio)
+        audio = normalize_audio(audio)
         logger.info(f"Transcribing audio buffer: {len(audio)} samples at {sample_rate}Hz")
         result = self._run(audio)
         return (result.text or "").strip()
@@ -131,7 +116,7 @@ class Transcriber:
         Returns (text, [(word, start, end, probability)]).  Parakeet does not emit
         per-word probabilities; 1.0 is returned in that slot.
         """
-        audio = self._normalize_audio(audio)
+        audio = normalize_audio(audio)
         logger.debug(f"Transcribing with words: {len(audio)} samples at {sample_rate}Hz")
         result = self._run(audio, timestamps=True)
 
@@ -143,7 +128,7 @@ class Transcriber:
 
     def transcribe_partial(self, audio: np.ndarray) -> str:
         """Fast partial transcription for streaming use cases."""
-        audio = self._normalize_audio(audio)
+        audio = normalize_audio(audio)
         result = self._run(audio)
         return (result.text or "").strip()
 

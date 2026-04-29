@@ -1,14 +1,14 @@
 """HTTP client for transcription requests."""
 
-import io
 import json
 import logging
-import wave
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 import numpy as np
+
+from voiced.audio_codec import audio_to_wav
 
 logger = logging.getLogger(__name__)
 
@@ -31,28 +31,6 @@ class HttpTimeoutError(Exception):
     """Request timed out."""
 
     pass
-
-
-def audio_to_wav(audio: np.ndarray, sample_rate: int) -> bytes:
-    """Convert numpy audio array to WAV bytes.
-
-    Args:
-        audio: Audio data as numpy array (float32, mono).
-        sample_rate: Sample rate of the audio.
-
-    Returns:
-        WAV file bytes.
-    """
-    audio_int16 = (audio * 32767).clip(-32768, 32767).astype(np.int16)
-
-    buffer = io.BytesIO()
-    with wave.open(buffer, "wb") as wav:
-        wav.setnchannels(1)
-        wav.setsampwidth(2)
-        wav.setframerate(sample_rate)
-        wav.writeframes(audio_int16.tobytes())
-
-    return buffer.getvalue()
 
 
 class TranscriptionClient:

@@ -56,15 +56,15 @@ class TestTranscriberInit:
         transcriber = Transcriber(config)
         assert transcriber.config.model == "nvidia/parakeet-tdt-0.6b-v2"
 
-    def test_get_device_explicit(self):
+    def test_device_explicit(self):
         config = TranscriptionConfig(device="cpu")
         transcriber = Transcriber(config)
-        assert transcriber._get_device() == "cpu"
+        assert transcriber.device == "cpu"
 
-    def test_get_device_explicit_cuda(self):
+    def test_device_explicit_cuda(self):
         config = TranscriptionConfig(device="cuda")
         transcriber = Transcriber(config)
-        assert transcriber._get_device() == "cuda"
+        assert transcriber.device == "cuda"
 
 
 class TestTranscriberFileNotFound:
@@ -77,23 +77,6 @@ class TestTranscriberFileNotFound:
         transcriber = Transcriber()
         with pytest.raises(FileNotFoundError):
             transcriber.transcribe_file_with_segments("/nonexistent/audio.wav")
-
-
-class TestNormalizeAudio:
-    def test_int16_audio_is_scaled(self):
-        transcriber = Transcriber()
-        audio = np.array([16384, -16384, 32767, -32768], dtype=np.int16)
-        out = transcriber._normalize_audio(audio)
-        assert out.dtype == np.float32
-        assert out.min() >= -1.0
-        assert out.max() <= 1.0
-
-    def test_float32_in_range_passthrough(self):
-        transcriber = Transcriber()
-        audio = np.array([0.5, -0.5, 0.0], dtype=np.float32)
-        out = transcriber._normalize_audio(audio)
-        assert out is audio  # No copy needed
-        assert out.dtype == np.float32
 
 
 class TestTranscribeMocked:

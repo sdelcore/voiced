@@ -1,19 +1,18 @@
 """HTTP server for transcription and TTS requests."""
 
-import io
 import json
 import logging
 import re
 import tempfile
 import threading
 import time
-import wave
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
+from voiced.audio_codec import audio_to_wav, wav_to_audio
 from voiced.config import Config, load_config
 from voiced.diarizer import SpeakerIdentifier
 from voiced.profiles import ProfileManager, VoiceProfile
@@ -21,32 +20,6 @@ from voiced.transcriber import Transcriber
 from voiced.webrtc_server import WebRTCConnectionManager
 
 logger = logging.getLogger(__name__)
-
-
-def wav_to_audio(wav_bytes: bytes) -> tuple[np.ndarray, int]:
-    """Convert WAV bytes to numpy array and sample rate."""
-    buffer = io.BytesIO(wav_bytes)
-    with wave.open(buffer, "rb") as wav:
-        sample_rate = wav.getframerate()
-        n_channels = wav.getnchannels()
-        sample_width = wav.getsampwidth()
-        n_frames = wav.getnframes()
-        audio_bytes = wav.readframes(n_frames)
-
-        if sample_width == 2:
-            audio_int16 = np.frombuffer(audio_bytes, dtype=np.int16)
-            audio = audio_int16.astype(np.float32) / 32768.0
-        elif sample_width == 4:
-            audio_float32 = np.frombuffer(audio_bytes, dtype=np.float32)
-            audio = audio_float32
-        else:
-            raise ValueError(f"Unsupported sample width: {sample_width}")
-
-        if n_channels > 1:
-            audio = audio.reshape(-1, n_channels)
-            audio = np.mean(audio, axis=1)
-
-    return audio, sample_rate
 
 
 class TranscriptionHandler(BaseHTTPRequestHandler):
@@ -177,7 +150,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             self._send_error_json(404, "Not found", "NOT_FOUND")
 
     def _handle_health(self) -> None:
-        device = self.transcriber._get_device()
+        device = self.transcriber.device
         self._send_json(
             200,
             {
@@ -188,7 +161,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         )
 
     def _handle_status(self) -> None:
-        device = self.transcriber._get_device()
+        device = self.transcriber.device
         uptime = time.time() - self.start_time
 
         status_data = {
@@ -396,9 +369,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             logger.exception(f"Transcription failed: {e}")
             self._send_error_json(500, f"Transcription failed: {e}", "TRANSCRIPTION_ERROR")
 
-    def _transcribe(
-        self, audio: np.ndarray, sample_rate: int
-    ) -> list[tuple[float, float, str]]:
+    def _transcribe(self, audio: np.ndarray, sample_rate: int) -> list[tuple[float, float, str]]:
         """Transcribe audio and return (start, end, text) segments."""
         return self.transcriber.transcribe_audio_with_segments(audio, sample_rate)
 
@@ -471,7 +442,6 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         logger.info(f"Creating profile '{name}' from {duration:.1f}s of audio")
 
         try:
-
             # Get or create embedder
             identifier = self._get_speaker_identifier()
             embedder = identifier.embedder
@@ -683,7 +653,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             elapsed = time.time() - start_time
 
             # Convert to WAV bytes
-            wav_bytes = self._audio_to_wav(audio, synthesizer.sample_rate)
+            wav_bytes = audio_to_wav(audio, synthesizer.sample_rate)
 
             duration = len(audio) / synthesizer.sample_rate
             TranscriptionHandler.tts_request_count += 1
@@ -860,12 +830,15 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             )
             session_id, answer_sdp, ice_candidates = future.result(timeout=10.0)
 
-            self._send_json(200, {
-                "session_id": session_id,
-                "sdp": answer_sdp,
-                "type": "answer",
-                "ice_candidates": ice_candidates,
-            })
+            self._send_json(
+                200,
+                {
+                    "session_id": session_id,
+                    "sdp": answer_sdp,
+                    "type": "answer",
+                    "ice_candidates": ice_candidates,
+                },
+            )
 
         except json.JSONDecodeError:
             self._send_error_json(400, "Invalid JSON", "INVALID_JSON")
@@ -926,21 +899,6 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         except Exception as e:
             logger.exception(f"ICE candidate handling failed: {e}")
             self._send_error_json(500, f"Failed to add ICE candidate: {e}", "ICE_ERROR")
-
-    def _audio_to_wav(self, audio: np.ndarray, sample_rate: int) -> bytes:
-        """Convert numpy audio array to WAV bytes."""
-        buffer = io.BytesIO()
-
-        # Convert float32 to int16
-        audio_int16 = (audio * 32767).astype(np.int16)
-
-        with wave.open(buffer, "wb") as wav:
-            wav.setnchannels(1)
-            wav.setsampwidth(2)  # 16-bit
-            wav.setframerate(sample_rate)
-            wav.writeframes(audio_int16.tobytes())
-
-        return buffer.getvalue()
 
 
 class TranscriptionServer:

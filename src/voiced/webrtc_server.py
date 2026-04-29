@@ -15,6 +15,8 @@ from aiortc.contrib.media import MediaRelay
 from av import AudioFrame
 from scipy import signal
 
+from voiced.audio_codec import wav_to_audio
+
 logger = logging.getLogger(__name__)
 
 # Sample rates
@@ -156,28 +158,28 @@ class TTSOutputTrack(MediaStreamTrack):
         while len(self._buffer) < FRAME_SAMPLES:
             if not self._streaming and self._queue.empty():
                 # Generate silence when not streaming
-                self._buffer = np.concatenate([
-                    self._buffer,
-                    np.zeros(FRAME_SAMPLES, dtype=np.float32)
-                ])
+                self._buffer = np.concatenate(
+                    [self._buffer, np.zeros(FRAME_SAMPLES, dtype=np.float32)]
+                )
                 break
 
             try:
                 chunk = await asyncio.wait_for(self._queue.get(), timeout=0.1)
                 if chunk is None:
                     # End of stream, pad with silence
-                    self._buffer = np.concatenate([
-                        self._buffer,
-                        np.zeros(FRAME_SAMPLES - len(self._buffer), dtype=np.float32)
-                    ])
+                    self._buffer = np.concatenate(
+                        [
+                            self._buffer,
+                            np.zeros(FRAME_SAMPLES - len(self._buffer), dtype=np.float32),
+                        ]
+                    )
                     break
                 self._buffer = np.concatenate([self._buffer, chunk])
             except asyncio.TimeoutError:
                 # No data, generate silence
-                self._buffer = np.concatenate([
-                    self._buffer,
-                    np.zeros(FRAME_SAMPLES, dtype=np.float32)
-                ])
+                self._buffer = np.concatenate(
+                    [self._buffer, np.zeros(FRAME_SAMPLES, dtype=np.float32)]
+                )
                 break
 
         # Extract frame from buffer
@@ -312,11 +314,13 @@ class WebRTCConnectionManager:
         @pc.on("icecandidate")
         def on_icecandidate(candidate):
             if candidate:
-                ice_candidates.append({
-                    "candidate": candidate.candidate,
-                    "sdpMid": candidate.sdpMid,
-                    "sdpMLineIndex": candidate.sdpMLineIndex,
-                })
+                ice_candidates.append(
+                    {
+                        "candidate": candidate.candidate,
+                        "sdpMid": candidate.sdpMid,
+                        "sdpMLineIndex": candidate.sdpMLineIndex,
+                    }
+                )
 
         # Set remote description (offer)
         offer = RTCSessionDescription(sdp=offer_sdp, type="offer")
@@ -336,9 +340,7 @@ class WebRTCConnectionManager:
         logger.info(f"Created session {session_id}")
         return session_id, pc.localDescription.sdp, ice_candidates
 
-    async def _wait_for_ice_gathering(
-        self, pc: RTCPeerConnection, timeout: float = 5.0
-    ) -> None:
+    async def _wait_for_ice_gathering(self, pc: RTCPeerConnection, timeout: float = 5.0) -> None:
         """Wait for ICE gathering to complete."""
         if pc.iceGatheringState == "complete":
             return
@@ -379,9 +381,7 @@ class WebRTCConnectionManager:
         await session.peer_connection.addIceCandidate(ice_candidate)
         return True
 
-    async def _receive_audio_frames(
-        self, session: WebRTCSession, track: MediaStreamTrack
-    ) -> None:
+    async def _receive_audio_frames(self, session: WebRTCSession, track: MediaStreamTrack) -> None:
         """Receive and process audio frames from client."""
         while True:
             try:
@@ -409,33 +409,41 @@ class WebRTCConnectionManager:
             elif msg_type == "batch_transcribe":
                 await self._batch_transcribe(session, data)
             else:
-                await session.send_message({
-                    "type": "error",
-                    "code": "UNKNOWN_MESSAGE_TYPE",
-                    "message": f"Unknown message type: {msg_type}",
-                })
+                await session.send_message(
+                    {
+                        "type": "error",
+                        "code": "UNKNOWN_MESSAGE_TYPE",
+                        "message": f"Unknown message type: {msg_type}",
+                    }
+                )
         except json.JSONDecodeError:
-            await session.send_message({
-                "type": "error",
-                "code": "INVALID_JSON",
-                "message": "Invalid JSON message",
-            })
+            await session.send_message(
+                {
+                    "type": "error",
+                    "code": "INVALID_JSON",
+                    "message": "Invalid JSON message",
+                }
+            )
         except Exception as e:
             logger.exception(f"Error handling message: {e}")
-            await session.send_message({
-                "type": "error",
-                "code": "INTERNAL_ERROR",
-                "message": str(e),
-            })
+            await session.send_message(
+                {
+                    "type": "error",
+                    "code": "INTERNAL_ERROR",
+                    "message": str(e),
+                }
+            )
 
     async def _start_stt(self, session: WebRTCSession, config: dict) -> None:
         """Start STT recording."""
         if not self.transcriber:
-            await session.send_message({
-                "type": "error",
-                "code": "STT_NOT_AVAILABLE",
-                "message": "STT is not available",
-            })
+            await session.send_message(
+                {
+                    "type": "error",
+                    "code": "STT_NOT_AVAILABLE",
+                    "message": "STT is not available",
+                }
+            )
             return
 
         session.stt_config = STTConfig(
@@ -449,9 +457,7 @@ class WebRTCConnectionManager:
             session.stt_track.start_recording()
 
         # Start partial transcription task
-        session._partial_task = asyncio.create_task(
-            self._send_partial_transcriptions(session)
-        )
+        session._partial_task = asyncio.create_task(self._send_partial_transcriptions(session))
 
         await session.send_message({"type": "stt_started"})
 
@@ -479,11 +485,13 @@ class WebRTCConnectionManager:
 
                 if text and text != last_text:
                     last_text = text
-                    await session.send_message({
-                        "type": "stt_partial",
-                        "text": text,
-                        "is_final": False,
-                    })
+                    await session.send_message(
+                        {
+                            "type": "stt_partial",
+                            "text": text,
+                            "is_final": False,
+                        }
+                    )
             except Exception as e:
                 logger.warning(f"Partial transcription failed: {e}")
 
@@ -503,21 +511,25 @@ class WebRTCConnectionManager:
             session._partial_task = None
 
         if not session.stt_track:
-            await session.send_message({
-                "type": "error",
-                "code": "NO_AUDIO",
-                "message": "No audio track available",
-            })
+            await session.send_message(
+                {
+                    "type": "error",
+                    "code": "NO_AUDIO",
+                    "message": "No audio track available",
+                }
+            )
             return
 
         audio = session.stt_track.stop_recording()
 
         if len(audio) < STT_SAMPLE_RATE // 2:  # Less than 0.5 seconds
-            await session.send_message({
-                "type": "stt_final",
-                "text": "",
-                "segments": [],
-            })
+            await session.send_message(
+                {
+                    "type": "stt_final",
+                    "text": "",
+                    "segments": [],
+                }
+            )
             return
 
         # Run final transcription in thread pool
@@ -529,10 +541,12 @@ class WebRTCConnectionManager:
             session.stt_config,
         )
 
-        await session.send_message({
-            "type": "stt_final",
-            **result,
-        })
+        await session.send_message(
+            {
+                "type": "stt_final",
+                **result,
+            }
+        )
 
     def _transcribe_final(self, audio: np.ndarray, config: STTConfig) -> dict:
         """Transcribe audio with full quality and optional speaker ID."""
@@ -546,13 +560,15 @@ class WebRTCConnectionManager:
         # Build result
         result_segments = []
         for start, end, text in segments:
-            result_segments.append({
-                "start": start,
-                "end": end,
-                "text": text,
-                "speaker": "Unknown",
-                "speaker_confidence": 0.0,
-            })
+            result_segments.append(
+                {
+                    "start": start,
+                    "end": end,
+                    "text": text,
+                    "speaker": "Unknown",
+                    "speaker_confidence": 0.0,
+                }
+            )
 
         # Add speaker identification if requested
         if config.identify_speakers and self.speaker_identifier:
@@ -574,20 +590,24 @@ class WebRTCConnectionManager:
     async def _start_tts(self, session: WebRTCSession, config: dict) -> None:
         """Start TTS synthesis and streaming."""
         if not self.synthesizer:
-            await session.send_message({
-                "type": "error",
-                "code": "TTS_NOT_AVAILABLE",
-                "message": "TTS is not available",
-            })
+            await session.send_message(
+                {
+                    "type": "error",
+                    "code": "TTS_NOT_AVAILABLE",
+                    "message": "TTS is not available",
+                }
+            )
             return
 
         text = config.get("text", "")
         if not text:
-            await session.send_message({
-                "type": "error",
-                "code": "NO_TEXT",
-                "message": "No text provided for TTS",
-            })
+            await session.send_message(
+                {
+                    "type": "error",
+                    "code": "NO_TEXT",
+                    "message": "No text provided for TTS",
+                }
+            )
             return
 
         session.tts_config = TTSConfig(
@@ -657,11 +677,13 @@ class WebRTCConnectionManager:
             await session.send_message({"type": "tts_finished"})
         except Exception as e:
             logger.exception(f"TTS streaming failed: {e}")
-            await session.send_message({
-                "type": "error",
-                "code": "TTS_ERROR",
-                "message": str(e),
-            })
+            await session.send_message(
+                {
+                    "type": "error",
+                    "code": "TTS_ERROR",
+                    "message": str(e),
+                }
+            )
         finally:
             session._tts_active = False
 
@@ -674,37 +696,30 @@ class WebRTCConnectionManager:
     async def _batch_transcribe(self, session: WebRTCSession, data: dict) -> None:
         """Handle batch transcription request via data channel."""
         if not self.transcriber:
-            await session.send_message({
-                "type": "error",
-                "code": "STT_NOT_AVAILABLE",
-                "message": "STT is not available",
-            })
+            await session.send_message(
+                {
+                    "type": "error",
+                    "code": "STT_NOT_AVAILABLE",
+                    "message": "STT is not available",
+                }
+            )
             return
 
         audio_b64 = data.get("audio_base64", "")
         if not audio_b64:
-            await session.send_message({
-                "type": "error",
-                "code": "NO_AUDIO",
-                "message": "No audio data provided",
-            })
+            await session.send_message(
+                {
+                    "type": "error",
+                    "code": "NO_AUDIO",
+                    "message": "No audio data provided",
+                }
+            )
             return
 
         try:
             # Decode base64 audio (expects WAV)
             audio_bytes = base64.b64decode(audio_b64)
-
-            # Parse WAV
-            import io
-            import wave
-
-            buffer = io.BytesIO(audio_bytes)
-            with wave.open(buffer, "rb") as wav:
-                sample_rate = wav.getframerate()
-                n_frames = wav.getnframes()
-                audio_raw = wav.readframes(n_frames)
-                audio = np.frombuffer(audio_raw, dtype=np.int16).astype(np.float32)
-                audio = audio / 32768.0
+            audio, sample_rate = wav_to_audio(audio_bytes)
 
             # Resample to 16kHz if needed
             if sample_rate != STT_SAMPLE_RATE:
@@ -725,17 +740,21 @@ class WebRTCConnectionManager:
                 config,
             )
 
-            await session.send_message({
-                "type": "batch_result",
-                **result,
-            })
+            await session.send_message(
+                {
+                    "type": "batch_result",
+                    **result,
+                }
+            )
         except Exception as e:
             logger.exception(f"Batch transcription failed: {e}")
-            await session.send_message({
-                "type": "error",
-                "code": "BATCH_ERROR",
-                "message": str(e),
-            })
+            await session.send_message(
+                {
+                    "type": "error",
+                    "code": "BATCH_ERROR",
+                    "message": str(e),
+                }
+            )
 
     async def _remove_session(self, session_id: str) -> None:
         """Remove and cleanup a session."""
