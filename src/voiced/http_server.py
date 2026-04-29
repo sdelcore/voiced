@@ -922,7 +922,7 @@ class TranscriptionServer:
 
     def _preload_model(self) -> None:
         logger.info("Pre-loading transcription model...")
-        _ = self.transcriber.model
+        self.transcriber.warmup()
         logger.info("Model loaded successfully")
 
     def _start_asyncio_loop(self) -> None:

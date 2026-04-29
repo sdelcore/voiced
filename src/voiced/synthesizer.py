@@ -6,11 +6,13 @@ import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from typing import Any
 
 import numpy as np
 import torch
 
 from voiced.device import resolve_device_config
+from voiced.model_host import ModelHost
 from voiced.voice_manager import VoiceManager
 
 logger = logging.getLogger(__name__)
@@ -59,24 +61,24 @@ class Synthesizer:
             config: TTS configuration. If None, uses defaults.
         """
         self.config = config or TTSConfig()
-        self.model = None
-        self.processor = None
+        self.processor: Any = None
         self.voice_manager = VoiceManager()
-        self._lock = threading.Lock()
         self._last_used: float | None = None
-        self._unload_timer: threading.Timer | None = None
         self._device: str | None = None
         self._dtype: torch.dtype | None = None
         self._attn_impl: str | None = None
+        self._host: ModelHost[Any] = ModelHost(
+            loader=self._load_model,
+            idle_timeout=(
+                self.config.unload_timeout_seconds
+                if self.config.unload_timeout_seconds > 0
+                else None
+            ),
+            on_unload=self._on_unload,
+            name="vibevoice",
+        )
 
-    def _ensure_loaded(self):
-        """Lazy load model on first use."""
-        with self._lock:
-            if self.model is None:
-                self._load_model()
-            self._reset_unload_timer()
-
-    def _load_model(self):
+    def _load_model(self) -> Any:
         """Load VibeVoice model from HuggingFace."""
         if not check_vibevoice_installed():
             raise RuntimeError(
@@ -106,15 +108,15 @@ class Synthesizer:
 
         try:
             if self._device == "mps":
-                self.model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
+                model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
                     self.config.model_path,
                     torch_dtype=self._dtype,
                     attn_implementation=self._attn_impl,
                     device_map=None,
                 )
-                self.model.to("mps")
+                model.to("mps")
             else:
-                self.model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
+                model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
                     self.config.model_path,
                     torch_dtype=self._dtype,
                     device_map=self._device,
@@ -125,47 +127,28 @@ class Synthesizer:
                 logger.warning(f"Flash attention failed: {e}")
                 logger.info("Falling back to SDPA attention...")
                 self._attn_impl = "sdpa"
-                self.model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
+                model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
                     self.config.model_path,
                     torch_dtype=self._dtype,
                     device_map=self._device if self._device != "mps" else None,
                     attn_implementation="sdpa",
                 )
                 if self._device == "mps":
-                    self.model.to("mps")
+                    model.to("mps")
             else:
                 raise
 
-        self.model.eval()
-        self.model.set_ddpm_inference_steps(num_steps=5)
+        model.eval()
+        model.set_ddpm_inference_steps(num_steps=5)
         logger.info("TTS model loaded successfully")
+        return model
 
-    def _unload_model(self):
-        """Unload model to free GPU memory."""
-        with self._lock:
-            if self.model is not None:
-                logger.info("Unloading TTS model due to inactivity...")
-                self.model = None
-                self.processor = None
-                self.voice_manager.clear_memory_cache()
-                if torch.cuda.is_available():
-                    torch.cuda.empty_cache()
-                logger.info("TTS model unloaded")
-
-    def _reset_unload_timer(self):
-        """Reset the auto-unload timer."""
-        self._last_used = time.time()
-
-        if self._unload_timer is not None:
-            self._unload_timer.cancel()
-
-        if self.config.unload_timeout_seconds > 0:
-            self._unload_timer = threading.Timer(
-                self.config.unload_timeout_seconds,
-                self._unload_model,
-            )
-            self._unload_timer.daemon = True
-            self._unload_timer.start()
+    def _on_unload(self, _model: Any) -> None:
+        """Cleanup hook fired by ModelHost when the model is dropped."""
+        self.processor = None
+        self.voice_manager.clear_memory_cache()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
 
     def synthesize(
         self,
@@ -183,43 +166,36 @@ class Synthesizer:
         Returns:
             Audio samples as numpy array (float32, 24kHz)
         """
-        self._ensure_loaded()
-
         voice = voice or self.config.default_voice
         cfg_scale = cfg_scale if cfg_scale is not None else self.config.cfg_scale
 
-        # Load voice cache
-        voice_cache = self.voice_manager.load_voice_cache(voice, self._device)
+        with self._host.use() as model:
+            self._last_used = time.time()
+            voice_cache = self.voice_manager.load_voice_cache(voice, self._device)
 
-        # Prepare inputs
-        inputs = self.processor.process_input_with_cached_prompt(
-            text=text,
-            cached_prompt=voice_cache,
-            padding=True,
-            return_tensors="pt",
-            return_attention_mask=True,
-        )
+            inputs = self.processor.process_input_with_cached_prompt(
+                text=text,
+                cached_prompt=voice_cache,
+                padding=True,
+                return_tensors="pt",
+                return_attention_mask=True,
+            )
+            for k, v in inputs.items():
+                if torch.is_tensor(v):
+                    inputs[k] = v.to(self._device)
 
-        # Move tensors to device
-        for k, v in inputs.items():
-            if torch.is_tensor(v):
-                inputs[k] = v.to(self._device)
-
-        # Generate
-        logger.info(f"Synthesizing: {text[:50]}...")
-        start_time = time.time()
-
-        outputs = self.model.generate(
-            **inputs,
-            cfg_scale=cfg_scale,
-            tokenizer=self.processor.tokenizer,
-            generation_config={"do_sample": False},
-            verbose=False,
-            show_progress_bar=False,
-            all_prefilled_outputs=copy.deepcopy(voice_cache),
-        )
-
-        gen_time = time.time() - start_time
+            logger.info(f"Synthesizing: {text[:50]}...")
+            start_time = time.time()
+            outputs = model.generate(
+                **inputs,
+                cfg_scale=cfg_scale,
+                tokenizer=self.processor.tokenizer,
+                generation_config={"do_sample": False},
+                verbose=False,
+                show_progress_bar=False,
+                all_prefilled_outputs=copy.deepcopy(voice_cache),
+            )
+            gen_time = time.time() - start_time
 
         if outputs.speech_outputs and outputs.speech_outputs[0] is not None:
             audio = outputs.speech_outputs[0]
@@ -252,67 +228,63 @@ class Synthesizer:
         """
         from vibevoice.modular.streamer import AudioStreamer
 
-        self._ensure_loaded()
-
         voice = voice or self.config.default_voice
         cfg_scale = cfg_scale if cfg_scale is not None else self.config.cfg_scale
 
-        # Load voice cache
-        voice_cache = self.voice_manager.load_voice_cache(voice, self._device)
+        # Hold a lease for the entire streaming call so the host cannot unload
+        # the model while we're producing chunks.
+        with self._host.use() as model:
+            self._last_used = time.time()
+            voice_cache = self.voice_manager.load_voice_cache(voice, self._device)
 
-        # Prepare inputs
-        inputs = self.processor.process_input_with_cached_prompt(
-            text=text,
-            cached_prompt=voice_cache,
-            padding=True,
-            return_tensors="pt",
-            return_attention_mask=True,
-        )
+            inputs = self.processor.process_input_with_cached_prompt(
+                text=text,
+                cached_prompt=voice_cache,
+                padding=True,
+                return_tensors="pt",
+                return_attention_mask=True,
+            )
+            for k, v in inputs.items():
+                if torch.is_tensor(v):
+                    inputs[k] = v.to(self._device)
 
-        for k, v in inputs.items():
-            if torch.is_tensor(v):
-                inputs[k] = v.to(self._device)
+            audio_streamer = AudioStreamer(batch_size=1, stop_signal=None)
+            generation_error: list[Exception] = []
 
-        # Create audio streamer
-        audio_streamer = AudioStreamer(batch_size=1, stop_signal=None)
-        generation_error = []
+            def generate_thread():
+                try:
+                    model.generate(
+                        **inputs,
+                        cfg_scale=cfg_scale,
+                        tokenizer=self.processor.tokenizer,
+                        generation_config={"do_sample": False},
+                        verbose=False,
+                        show_progress_bar=False,
+                        audio_streamer=audio_streamer,
+                        all_prefilled_outputs=copy.deepcopy(voice_cache),
+                    )
+                except Exception as e:
+                    generation_error.append(e)
+                    audio_streamer.end()
 
-        def generate_thread():
+            thread = threading.Thread(target=generate_thread, daemon=True)
+            thread.start()
+
             try:
-                self.model.generate(
-                    **inputs,
-                    cfg_scale=cfg_scale,
-                    tokenizer=self.processor.tokenizer,
-                    generation_config={"do_sample": False},
-                    verbose=False,
-                    show_progress_bar=False,
-                    audio_streamer=audio_streamer,
-                    all_prefilled_outputs=copy.deepcopy(voice_cache),
-                )
-            except Exception as e:
-                generation_error.append(e)
-                audio_streamer.end()
-
-        # Start generation in background
-        thread = threading.Thread(target=generate_thread, daemon=True)
-        thread.start()
-
-        # Yield chunks as they arrive
-        try:
-            for chunk in audio_streamer.get_stream(0):
-                if torch.is_tensor(chunk):
-                    chunk = chunk.float().cpu().numpy()
-                chunk = np.squeeze(chunk).astype(np.float32)
-                yield chunk
-        finally:
-            thread.join(timeout=5)
-            if generation_error:
-                raise generation_error[0]
+                for chunk in audio_streamer.get_stream(0):
+                    if torch.is_tensor(chunk):
+                        chunk = chunk.float().cpu().numpy()
+                    chunk = np.squeeze(chunk).astype(np.float32)
+                    yield chunk
+            finally:
+                thread.join(timeout=5)
+                if generation_error:
+                    raise generation_error[0]
 
     @property
     def is_loaded(self) -> bool:
         """Check if model is currently loaded."""
-        return self.model is not None
+        return self._host.is_loaded
 
     @property
     def device(self) -> str | None:
@@ -339,6 +311,4 @@ class Synthesizer:
 
     def shutdown(self):
         """Shutdown synthesizer and cleanup resources."""
-        if self._unload_timer is not None:
-            self._unload_timer.cancel()
-        self._unload_model()
+        self._host.shutdown()

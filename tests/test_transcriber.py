@@ -49,7 +49,7 @@ class TestTranscriberInit:
     def test_init(self):
         transcriber = Transcriber()
         assert transcriber.config.model == "nvidia/parakeet-tdt-0.6b-v3"
-        assert transcriber._model is None  # Lazy load
+        assert not transcriber._host.is_loaded  # Lazy load
 
     def test_init_with_config(self):
         config = TranscriptionConfig(model="nvidia/parakeet-tdt-0.6b-v2")
@@ -85,7 +85,7 @@ class TestTranscribeMocked:
     def _stub_model(self, transcriber: Transcriber, result: SimpleNamespace) -> MagicMock:
         model = MagicMock()
         model.transcribe.return_value = [result]
-        transcriber._model = model
+        transcriber._host._model = model
         return model
 
     def test_transcribe_audio_returns_text(self):
@@ -163,7 +163,7 @@ class TestTranscribeMocked:
         transcriber = Transcriber()
         model = MagicMock()
         model.transcribe.return_value = []
-        transcriber._model = model
+        transcriber._host._model = model
         audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
         with pytest.raises(RuntimeError, match="no results"):
             transcriber.transcribe_audio(audio)
@@ -172,7 +172,7 @@ class TestTranscribeMocked:
         transcriber = Transcriber()
         self._stub_model(transcriber, _fake_result())
         transcriber.unload()
-        assert transcriber._model is None
+        assert not transcriber._host.is_loaded
 
 
 class TestSampleRateConstant:
