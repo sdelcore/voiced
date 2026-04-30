@@ -501,62 +501,42 @@ def _transcribe_remote(
     timeout: float,
     annotate: bool,
 ) -> None:
-    """Transcribe using remote server via WebRTC."""
+    """Transcribe using a remote server over HTTP."""
     import soundfile as sf
 
-    from voiced.webrtc_client import SyncWebRTCClient, WebRTCClientConfig
+    from voiced.http_client import HttpConnectionError, ServerError, TranscriptionClient
+    from voiced.transcribe import RemoteTranscribe
 
-    # Load audio file
     audio, sample_rate = sf.read(str(audio_file), dtype="float32")
-
-    # Convert stereo to mono if needed
     if len(audio.shape) > 1:
         audio = audio.mean(axis=1)
 
-    config = WebRTCClientConfig(server_url=server_url, timeout=timeout)
-    client = SyncWebRTCClient(config)
+    click.echo(f"Sending audio to {server_url}...", err=True)
+    transcribe = RemoteTranscribe(TranscriptionClient(server_url, timeout=timeout))
 
     try:
-        click.echo("Connecting via WebRTC...", err=True)
-        client.connect()
-
-        # Server handles diarization when identify_speakers=True
-        result = client.batch_transcribe(
-            audio,
-            sample_rate=sample_rate,
-            identify_speakers=annotate,
-            timeout=timeout,
-        )
-
-        if annotate and result.segments:
-            # Format segments with speaker info
-            output_lines = []
-            for seg in result.segments:
-                start = seg.get("start", 0)
-                end = seg.get("end", 0)
-                speaker = seg.get("speaker", "Unknown")
-                text = seg.get("text", "").strip()
-                time_str = f"[{start:.2f}-{end:.2f}]"
-                output_lines.append(f"{time_str} {speaker}: {text}")
-            text = "\n".join(output_lines)
-        else:
-            text = result.text
-
-        if output:
-            with open(output, "w") as f:
-                f.write(text)
-            click.echo(f"Saved to: {output}", err=True)
-        else:
-            click.echo(text)
-
-    except Exception as e:
-        import traceback
-
-        click.echo(f"Error ({type(e).__name__}): {e}", err=True)
-        traceback.print_exc()
+        result = transcribe.transcribe(audio, sample_rate=sample_rate, identify_speakers=annotate)
+    except ServerError as e:
+        click.echo(f"Server error: {e}", err=True)
         sys.exit(1)
-    finally:
-        client.disconnect()
+    except HttpConnectionError as e:
+        click.echo(f"Connection error: {e}", err=True)
+        sys.exit(1)
+
+    if annotate and result.segments:
+        text = "\n".join(
+            f"[{seg.start:.2f}-{seg.end:.2f}] {seg.speaker}: {seg.text.strip()}"
+            for seg in result.segments
+        )
+    else:
+        text = result.text
+
+    if output:
+        with open(output, "w") as f:
+            f.write(text)
+        click.echo(f"Saved to: {output}", err=True)
+    else:
+        click.echo(text)
 
 
 def _transcribe_local(
