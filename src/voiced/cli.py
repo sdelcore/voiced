@@ -262,9 +262,7 @@ def client_cmd(
 )
 @click.option("--timeout", type=float, default=30.0, help="Connection timeout in seconds")
 @click.pass_context
-def webrtc_client_cmd(
-    ctx: click.Context, server_url: str | None, timeout: float
-) -> None:
+def webrtc_client_cmd(ctx: click.Context, server_url: str | None, timeout: float) -> None:
     """Start interactive WebRTC client for real-time streaming.
 
     Connects to a server with WebRTC enabled for low-latency bidirectional
@@ -553,6 +551,7 @@ def _transcribe_remote(
 
     except Exception as e:
         import traceback
+
         click.echo(f"Error ({type(e).__name__}): {e}", err=True)
         traceback.print_exc()
         sys.exit(1)
@@ -931,10 +930,8 @@ def register(
 
     # For remote registration, we don't check local profile existence
     if not server_url:
-        from voiced.profiles import ProfileManager
-
-        pm = ProfileManager()
-        if pm.exists(name) and not force:
+        store_for_check = _build_profile_store(None, timeout, config, device)
+        if store_for_check.exists(name) and not force:
             click.echo(
                 f"Error: Profile '{name}' already exists. Use --force to overwrite.", err=True
             )
@@ -970,23 +967,24 @@ def register(
         temp_file = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
         sf.write(temp_file.name, audio_data, config.audio.sample_rate)
         audio_file = Path(temp_file.name)
-        audio_duration = len(audio_data) / config.audio.sample_rate
-    else:
-        import soundfile as sf
-
-        info = sf.info(str(audio_file))
-        audio_duration = info.duration
 
     # At this point audio_file is guaranteed to be set
     assert audio_file is not None
 
     try:
-        if server_url:
-            # Remote registration
-            _register_remote(name, audio_file, server_url, timeout)
-        else:
-            # Local registration
-            _register_local(name, audio_file, audio_duration, device, config)
+        import soundfile as sf
+
+        audio, sample_rate = sf.read(str(audio_file), dtype="float32")
+        if len(audio.shape) > 1:
+            audio = audio.mean(axis=1)
+
+        store = _build_profile_store(server_url, timeout, config, device)
+        location = f"server: {server_url}" if server_url else "local storage"
+        click.echo(f"Registering profile '{name}' on {location}", err=True)
+
+        profile = store.register_from_audio(name, audio, sample_rate)
+        click.echo(f"Profile '{name}' registered")
+        click.echo(f"  Audio duration: {profile.audio_duration:.1f}s")
 
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
@@ -996,73 +994,22 @@ def register(
             audio_file.unlink()
 
 
-def _register_remote(name: str, audio_file: Path, server_url: str, timeout: float) -> None:
-    """Register a voice profile on a remote server."""
-    import soundfile as sf
-
-    from voiced.http_client import (
-        HttpConnectionError,
-        ServerError,
-        TranscriptionClient,
-    )
-
-    click.echo(f"Registering profile '{name}' on server: {server_url}", err=True)
-
-    # Load audio file
-    audio, sample_rate = sf.read(str(audio_file), dtype="float32")
-
-    # Convert stereo to mono if needed
-    if len(audio.shape) > 1:
-        audio = audio.mean(axis=1)
-
-    client = TranscriptionClient(server_url, timeout=timeout)
-
-    try:
-        result = client.create_profile(name, audio, sample_rate)
-        click.echo(f"Profile '{name}' registered on server")
-        if "audio_duration" in result:
-            click.echo(f"  Audio duration: {result['audio_duration']:.1f}s")
-    except ServerError as e:
-        click.echo(f"Server error: {e}", err=True)
-        sys.exit(1)
-    except HttpConnectionError as e:
-        click.echo(f"Connection error: {e}", err=True)
-        sys.exit(1)
-
-
-def _register_local(
-    name: str,
-    audio_file: Path,
-    audio_duration: float,
-    device: str | None,
+def _build_profile_store(
+    server_url: str | None,
+    timeout: float,
     config,
-) -> None:
-    """Register a voice profile locally."""
-    from datetime import datetime
+    device: str | None = None,
+):
+    """Construct a ProfileStore — local or remote based on whether server_url is set."""
+    if server_url:
+        from voiced.http_client import TranscriptionClient
+        from voiced.profile_store import RemoteProfileStore
 
-    from voiced.diarizer import SpeakerEmbedder
-    from voiced.profiles import ProfileManager, VoiceProfile
+        return RemoteProfileStore(TranscriptionClient(server_url, timeout=timeout))
 
-    click.echo(f"Extracting voice embedding from: {audio_file}", err=True)
+    from voiced.profile_store import LocalProfileStore
 
-    dev = device or config.diarization.device
-    embedder = SpeakerEmbedder(
-        model_source=config.diarization.model,
-        device=dev,
-    )
-    embedding = embedder.extract_embedding(audio_file)
-
-    profile = VoiceProfile(
-        name=name,
-        embedding=embedding.tolist(),
-        created_at=datetime.now().isoformat(),
-        audio_duration=audio_duration,
-        model_version=embedder.model_source,
-    )
-
-    pm = ProfileManager()
-    path = pm.save(profile)
-    click.echo(f"Profile '{name}' saved to: {path}")
+    return LocalProfileStore(diarization_config=config.diarization, device=device)
 
 
 # Profile management command group
@@ -1095,62 +1042,27 @@ def profiles(ctx: click.Context) -> None:
 @click.option("--timeout", type=float, default=10.0, help="Request timeout in seconds")
 def profiles_list(server_url: str | None, timeout: float = 10.0) -> None:
     """List all voice profiles (local or remote)."""
-    if server_url:
-        _list_profiles_remote(server_url, timeout)
-    else:
-        _list_profiles_local()
-
-
-def _list_profiles_local() -> None:
-    """List local voice profiles."""
-    from voiced.profiles import ProfileManager
-
-    pm = ProfileManager()
-    profile_list = pm.load_all()
+    config = load_config()
+    store = _build_profile_store(server_url, timeout, config)
+    try:
+        profile_list = store.list()
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
     if not profile_list:
-        click.echo("No profiles registered. Use 'voiced register' to create one.")
+        location = f"server: {server_url}" if server_url else "locally"
+        click.echo(f"No profiles registered {location}.")
+        if not server_url:
+            click.echo("Use 'voiced register' to create one.")
         return
 
-    click.echo("Registered voice profiles:\n")
+    header = f"Voice profiles on {server_url}:" if server_url else "Registered voice profiles:"
+    click.echo(f"{header}\n")
     for p in profile_list:
         click.echo(f"  {p.name}")
-        click.echo(f"    Created: {p.created_at}")
+        click.echo(f"    Created: {p.created_at or 'unknown'}")
         click.echo(f"    Audio duration: {p.audio_duration:.1f}s")
-
-
-def _list_profiles_remote(server_url: str, timeout: float) -> None:
-    """List remote voice profiles."""
-    from voiced.http_client import (
-        HttpConnectionError,
-        ServerError,
-        TranscriptionClient,
-    )
-
-    client = TranscriptionClient(server_url, timeout=timeout)
-
-    try:
-        profile_list = client.list_profiles()
-
-        if not profile_list:
-            click.echo(f"No profiles on server: {server_url}")
-            return
-
-        click.echo(f"Voice profiles on {server_url}:\n")
-        for p in profile_list:
-            name = p.get("name", "unknown")
-            created_at = p.get("created_at", "unknown")
-            audio_duration = p.get("audio_duration", 0)
-            click.echo(f"  {name}")
-            click.echo(f"    Created: {created_at}")
-            click.echo(f"    Audio duration: {audio_duration:.1f}s")
-
-    except ServerError as e:
-        click.echo(f"Server error: {e}", err=True)
-        sys.exit(1)
-    except HttpConnectionError as e:
-        click.echo(f"Connection error: {e}", err=True)
-        sys.exit(1)
 
 
 @profiles.command("show")
@@ -1159,61 +1071,26 @@ def _list_profiles_remote(server_url: str, timeout: float) -> None:
 @click.option("--timeout", type=float, default=10.0, help="Request timeout in seconds")
 def profiles_show(name: str, server_url: str | None, timeout: float) -> None:
     """Show details of a voice profile."""
-    if server_url:
-        _show_profile_remote(name, server_url, timeout)
-    else:
-        _show_profile_local(name)
-
-
-def _show_profile_local(name: str) -> None:
-    """Show local voice profile details."""
-    from voiced.profiles import ProfileManager
-
-    pm = ProfileManager()
-    profile = pm.load(name)
+    config = load_config()
+    store = _build_profile_store(server_url, timeout, config)
+    try:
+        profile = store.get(name)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
     if not profile:
-        click.echo(f"Profile '{name}' not found", err=True)
+        location = "server" if server_url else "locally"
+        click.echo(f"Profile '{name}' not found {location}", err=True)
         sys.exit(1)
 
     click.echo(f"Profile: {profile.name}\n")
-    click.echo(f"  Created: {profile.created_at}")
+    click.echo(f"  Created: {profile.created_at or 'unknown'}")
     click.echo(f"  Audio duration: {profile.audio_duration:.1f}s")
-    click.echo(f"  Model version: {profile.model_version}")
-    click.echo(f"  Embedding dimensions: {len(profile.embedding)}")
-
-
-def _show_profile_remote(name: str, server_url: str, timeout: float) -> None:
-    """Show remote voice profile details."""
-    from voiced.http_client import (
-        HttpConnectionError,
-        ServerError,
-        TranscriptionClient,
-    )
-
-    client = TranscriptionClient(server_url, timeout=timeout)
-
-    try:
-        profile = client.get_profile(name)
-
-        if not profile:
-            click.echo(f"Profile '{name}' not found on server", err=True)
-            sys.exit(1)
-
-        click.echo(f"Profile: {profile.get('name', name)}\n")
-        click.echo(f"  Created: {profile.get('created_at', 'unknown')}")
-        click.echo(f"  Audio duration: {profile.get('audio_duration', 0):.1f}s")
-        if "model_version" in profile:
-            click.echo(f"  Model version: {profile['model_version']}")
-        if "embedding" in profile:
-            click.echo(f"  Embedding dimensions: {len(profile['embedding'])}")
-
-    except ServerError as e:
-        click.echo(f"Server error: {e}", err=True)
-        sys.exit(1)
-    except HttpConnectionError as e:
-        click.echo(f"Connection error: {e}", err=True)
-        sys.exit(1)
+    if profile.model_version:
+        click.echo(f"  Model version: {profile.model_version}")
+    if profile.embedding:
+        click.echo(f"  Embedding dimensions: {len(profile.embedding)}")
 
 
 @profiles.command("delete")
@@ -1229,46 +1106,19 @@ def profiles_delete(name: str, server_url: str | None, force: bool, timeout: flo
             click.echo("Cancelled")
             return
 
-    if server_url:
-        _delete_profile_remote(name, server_url, timeout)
-    else:
-        _delete_profile_local(name)
+    config = load_config()
+    store = _build_profile_store(server_url, timeout, config)
+    try:
+        deleted = store.delete(name)
+    except Exception as e:
+        click.echo(f"Error: {e}", err=True)
+        sys.exit(1)
 
-
-def _delete_profile_local(name: str) -> None:
-    """Delete local voice profile."""
-    from voiced.profiles import ProfileManager
-
-    pm = ProfileManager()
-    if pm.delete(name):
+    if deleted:
         click.echo(f"Profile '{name}' deleted")
     else:
-        click.echo(f"Profile '{name}' not found", err=True)
-        sys.exit(1)
-
-
-def _delete_profile_remote(name: str, server_url: str, timeout: float) -> None:
-    """Delete remote voice profile."""
-    from voiced.http_client import (
-        HttpConnectionError,
-        ServerError,
-        TranscriptionClient,
-    )
-
-    client = TranscriptionClient(server_url, timeout=timeout)
-
-    try:
-        if client.delete_profile(name):
-            click.echo(f"Profile '{name}' deleted from server")
-        else:
-            click.echo(f"Profile '{name}' not found on server", err=True)
-            sys.exit(1)
-
-    except ServerError as e:
-        click.echo(f"Server error: {e}", err=True)
-        sys.exit(1)
-    except HttpConnectionError as e:
-        click.echo(f"Connection error: {e}", err=True)
+        location = "server" if server_url else "locally"
+        click.echo(f"Profile '{name}' not found {location}", err=True)
         sys.exit(1)
 
 
