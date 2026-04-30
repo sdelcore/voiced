@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from voiced import audio
+from voiced.capabilities import Voiced
 from voiced.config import Config, get_pid_path, load_config
 from voiced.injector import inject_to_clipboard
 from voiced.recording_session import (
@@ -19,7 +20,6 @@ from voiced.recording_session import (
     TranscriptionResult,
 )
 from voiced.server import Server
-from voiced.transcriber import Transcriber
 from voiced.tray import TrayIcon, TrayState
 
 logger = logging.getLogger(__name__)
@@ -147,7 +147,7 @@ class Daemon:
 
         # Components
         self._server: Server | None = None
-        self._transcriber: Transcriber | None = None
+        self._voiced: Voiced | None = None
         self._tray: TrayIcon | None = None
         self._http_server = None  # TranscriptionServer instance
         self._session: RecordingSession | None = None
@@ -308,15 +308,17 @@ class Daemon:
             self._tray.start()
             logger.info("Tray icon started")
 
-            # Pre-load model
+            # Build the voice-capabilities composition root
+            self._voiced = Voiced.from_config(self.config)
+
+            # Pre-load transcription model
             logger.info("Pre-loading transcription model...")
-            self._transcriber = Transcriber(self.config.transcription)
-            self._transcriber.warmup()
+            self._voiced.transcriber.warmup()
             logger.info("Model loaded")
 
             # Recording session — owns state, recorder, transcription worker
             self._session = RecordingSession(
-                transcriber=self._transcriber,
+                transcriber=self._voiced.transcriber,
                 audio_config=self.config.audio,
                 sample_rate=self.config.audio.sample_rate,
             )
@@ -341,14 +343,14 @@ class Daemon:
             self._cleanup()
 
     def _start_http_server(self) -> None:
-        """Start the embedded HTTP server in a background thread."""
+        """Start the embedded HTTP server, sharing the daemon's Voiced instance."""
         server_class = _get_transcription_server()
         self._http_server = server_class(
             host=self._http_host,
             port=self._http_port,
             config=self.config,
+            voiced=self._voiced,
         )
-        self._http_server.transcriber = self._transcriber
         self._http_server.start_background(preload=False)
         logger.info(f"HTTP server started on {self._http_host}:{self._http_port}")
 
@@ -367,8 +369,9 @@ class Daemon:
         if self._server is not None:
             self._server.stop()
 
-        if self._transcriber is not None:
-            self._transcriber.unload()
+        if self._voiced is not None:
+            self._voiced.shutdown()
+            self._voiced = None
 
         if self._tray is not None:
             self._tray.stop()

@@ -6,16 +6,16 @@ import re
 import tempfile
 import threading
 import time
-from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 import numpy as np
 
 from voiced.audio_codec import audio_to_wav, wav_to_audio
+from voiced.capabilities import Voiced
 from voiced.config import Config, load_config
-from voiced.diarizer import SpeakerIdentifier
-from voiced.profiles import ProfileManager, VoiceProfile
+from voiced.profile_store import LocalProfileStore, RemoteProfileStore  # noqa: F401
+from voiced.profiles import ProfileManager
 from voiced.transcriber import Transcriber
 from voiced.webrtc_server import WebRTCConnectionManager
 
@@ -25,23 +25,25 @@ logger = logging.getLogger(__name__)
 class TranscriptionHandler(BaseHTTPRequestHandler):
     """Handle transcription and TTS HTTP requests."""
 
-    transcriber: Transcriber
-    config: Config
+    voiced: Voiced
     start_time: float
     request_count: int = 0
     tts_request_count: int = 0
     protocol_version = "HTTP/1.1"
 
-    # Lazy-loaded speaker identifier (class attribute for sharing across requests)
-    _speaker_identifier: SpeakerIdentifier | None = None
-    _profile_manager: ProfileManager | None = None
-
-    # TTS synthesizer (lazy-loaded, shared across requests)
-    _synthesizer = None
-
     # WebRTC connection manager
     _webrtc_manager: WebRTCConnectionManager | None = None
     _asyncio_loop = None
+
+    @property
+    def config(self) -> Config:
+        """Backwards-compat alias — handlers historically used self.config."""
+        return self.voiced.config
+
+    @property
+    def transcriber(self) -> Transcriber:
+        """Backwards-compat alias — the daemon uses this to share its loaded Transcriber."""
+        return self.voiced.transcriber
 
     def log_message(self, format: str, *args) -> None:
         logger.info("%s - %s", self.address_string(), format % args)
@@ -57,21 +59,18 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
     def _send_error_json(self, status: int, message: str, code: str) -> None:
         self._send_json(status, {"error": message, "code": code})
 
-    def _get_profile_manager(self, profiles_path: str | None = None) -> ProfileManager:
-        """Get or create profile manager."""
-        if profiles_path:
-            return ProfileManager(profiles_path)
-        if TranscriptionHandler._profile_manager is None:
-            TranscriptionHandler._profile_manager = ProfileManager()
-        return TranscriptionHandler._profile_manager
+    def _profile_store_for(self, profiles_path: str | None = None):
+        """Resolve which ProfileStore this request uses.
 
-    def _get_speaker_identifier(self) -> SpeakerIdentifier:
-        """Get or create speaker identifier (lazy-loaded)."""
-        if TranscriptionHandler._speaker_identifier is None:
-            TranscriptionHandler._speaker_identifier = SpeakerIdentifier(
-                config=self.config.diarization
+        ``profiles_path`` (a request-scoped query param) overrides the
+        Voiced default. Without it, the shared store is used.
+        """
+        if profiles_path:
+            return LocalProfileStore(
+                manager=ProfileManager(profiles_path),
+                diarization_config=self.config.diarization,
             )
-        return TranscriptionHandler._speaker_identifier
+        return self.voiced.profile_store
 
     def _parse_profile_name(self, path: str) -> str | None:
         """Parse profile name from /profiles/{name} path."""
@@ -164,20 +163,18 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         device = self.transcriber.device
         uptime = time.time() - self.start_time
 
+        synth = self.voiced._synthesizer  # avoid lazy-loading just to inspect state
         status_data = {
             "status": "ok",
             "state": "idle",
-            "model": self.transcriber.config.model,
+            "model": self.config.transcription.model,
             "device": device,
-            "language": self.transcriber.config.language,
+            "language": self.config.transcription.language,
             "request_count": TranscriptionHandler.request_count,
             "uptime_seconds": round(uptime, 1),
             "tts": {
                 "enabled": self.config.tts.enabled,
-                "model_loaded": (
-                    TranscriptionHandler._synthesizer is not None
-                    and TranscriptionHandler._synthesizer.is_loaded
-                ),
+                "model_loaded": synth is not None and synth.is_loaded,
                 "request_count": TranscriptionHandler.tts_request_count,
                 "default_voice": self.config.tts.default_voice,
             },
@@ -282,86 +279,32 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
 
         try:
             start_time = time.time()
-
-            segments_raw = self._transcribe(audio, sample_rate)
-
-            # Build full text from segments
-            full_text = " ".join(text for _, _, text in segments_raw)
-
-            # Apply speaker identification if enabled
-            segments_output = []
-            if identify_speakers and segments_raw:
-                try:
-                    profile_manager = self._get_profile_manager(profiles_path)
-                    profiles = profile_manager.load_all()
-
-                    if profiles:
-                        identifier = self._get_speaker_identifier()
-                        identified = identifier.identify_segments_from_array(
-                            audio,
-                            sample_rate,
-                            segments_raw,
-                            profiles,
-                        )
-                        for seg in identified:
-                            segments_output.append(
-                                {
-                                    "start": round(seg.start, 2),
-                                    "end": round(seg.end, 2),
-                                    "text": seg.text,
-                                    "speaker": seg.speaker,
-                                    "speaker_confidence": round(seg.confidence, 2),
-                                }
-                            )
-                    else:
-                        # No profiles, return segments without speaker info
-                        for start, end, text in segments_raw:
-                            segments_output.append(
-                                {
-                                    "start": round(start, 2),
-                                    "end": round(end, 2),
-                                    "text": text,
-                                    "speaker": "Unknown",
-                                    "speaker_confidence": 0.0,
-                                }
-                            )
-                except Exception as e:
-                    logger.warning(f"Speaker identification failed: {e}")
-                    # Fall back to segments without speaker info
-                    for start, end, text in segments_raw:
-                        segments_output.append(
-                            {
-                                "start": round(start, 2),
-                                "end": round(end, 2),
-                                "text": text,
-                                "speaker": "Unknown",
-                                "speaker_confidence": 0.0,
-                            }
-                        )
-            else:
-                # No speaker identification, return segments without speaker info
-                for start, end, text in segments_raw:
-                    segments_output.append(
-                        {
-                            "start": round(start, 2),
-                            "end": round(end, 2),
-                            "text": text,
-                            "speaker": "Unknown",
-                            "speaker_confidence": 0.0,
-                        }
-                    )
-
+            output = self.voiced.transcribe(
+                audio,
+                sample_rate,
+                identify_speakers=identify_speakers,
+                profile_store=self._profile_store_for(profiles_path),
+            )
             elapsed = time.time() - start_time
 
             TranscriptionHandler.request_count += 1
-
+            segments_output = [
+                {
+                    "start": s.start,
+                    "end": s.end,
+                    "text": s.text,
+                    "speaker": s.speaker,
+                    "speaker_confidence": s.speaker_confidence,
+                }
+                for s in output.segments
+            ]
             self._send_json(
                 200,
                 {
-                    "text": full_text,
-                    "duration": round(duration, 2),
+                    "text": output.text,
+                    "duration": round(output.duration, 2),
                     "processing_time": round(elapsed, 2),
-                    "model": self.transcriber.config.model,
+                    "model": self.config.transcription.model,
                     "segments": segments_output,
                 },
             )
@@ -369,26 +312,18 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             logger.exception(f"Transcription failed: {e}")
             self._send_error_json(500, f"Transcription failed: {e}", "TRANSCRIPTION_ERROR")
 
-    def _transcribe(self, audio: np.ndarray, sample_rate: int) -> list[tuple[float, float, str]]:
-        """Transcribe audio and return (start, end, text) segments."""
-        return self.transcriber.transcribe_audio_with_segments(audio, sample_rate)
-
     def _handle_list_profiles(self) -> None:
         """Handle GET /profiles - list all profiles."""
         try:
-            profile_manager = self._get_profile_manager()
-            profiles = profile_manager.load_all()
-
-            profiles_data = []
-            for p in profiles:
-                profiles_data.append(
-                    {
-                        "name": p.name,
-                        "created_at": p.created_at,
-                        "audio_duration": p.audio_duration,
-                    }
-                )
-
+            profiles = self.voiced.profile_store.list()
+            profiles_data = [
+                {
+                    "name": p.name,
+                    "created_at": p.created_at,
+                    "audio_duration": p.audio_duration,
+                }
+                for p in profiles
+            ]
             self._send_json(200, {"profiles": profiles_data})
         except Exception as e:
             logger.exception(f"Failed to list profiles: {e}")
@@ -397,9 +332,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
     def _handle_get_profile(self, name: str) -> None:
         """Handle GET /profiles/{name} - get single profile."""
         try:
-            profile_manager = self._get_profile_manager()
-            profile = profile_manager.load(name)
-
+            profile = self.voiced.profile_store.get(name)
             if profile is None:
                 self._send_error_json(404, f"Profile '{name}' not found", "PROFILE_NOT_FOUND")
                 return
@@ -442,33 +375,14 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         logger.info(f"Creating profile '{name}' from {duration:.1f}s of audio")
 
         try:
-            # Get or create embedder
-            identifier = self._get_speaker_identifier()
-            embedder = identifier.embedder
-
-            # Extract embedding from audio
-            embedding = embedder.extract_embedding_from_array(audio, sample_rate)
-
-            # Create profile
-            profile = VoiceProfile(
-                name=name,
-                embedding=embedding.tolist(),
-                created_at=datetime.utcnow().isoformat(),
-                audio_duration=round(duration, 1),
-                model_version=embedder.model_source,
-            )
-
-            # Save profile
-            profile_manager = self._get_profile_manager()
-            profile_manager.save(profile)
-
+            profile = self.voiced.profile_store.register_from_audio(name, audio, sample_rate)
             self._send_json(
                 201,
                 {
                     "status": "created",
                     "name": name,
-                    "audio_duration": round(duration, 1),
-                    "model_version": embedder.model_source,
+                    "audio_duration": round(profile.audio_duration, 1),
+                    "model_version": profile.model_version,
                 },
             )
         except Exception as e:
@@ -478,13 +392,12 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
     def _handle_delete_profile(self, name: str) -> None:
         """Handle DELETE /profiles/{name} - delete profile."""
         try:
-            profile_manager = self._get_profile_manager()
-
-            if not profile_manager.exists(name):
+            store = self.voiced.profile_store
+            if not store.exists(name):
                 self._send_error_json(404, f"Profile '{name}' not found", "PROFILE_NOT_FOUND")
                 return
 
-            deleted = profile_manager.delete(name)
+            deleted = store.delete(name)
             if deleted:
                 self._send_json(200, {"status": "deleted", "name": name})
             else:
@@ -511,35 +424,10 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             return match.group(1)
         return None
 
-    def _get_synthesizer(self):
-        """Get or create TTS synthesizer (lazy-loaded)."""
-        if TranscriptionHandler._synthesizer is None:
-            if not self.config.tts.enabled:
-                return None
-
-            from voiced.synthesizer import Synthesizer, TTSConfig, check_vibevoice_installed
-
-            if not check_vibevoice_installed():
-                logger.warning("VibeVoice is not installed, TTS endpoints will be unavailable")
-                return None
-
-            tts_config = TTSConfig(
-                model_path=self.config.tts.model,
-                device=self.config.tts.device,
-                default_voice=self.config.tts.default_voice,
-                cfg_scale=self.config.tts.cfg_scale,
-                unload_timeout_seconds=self.config.tts.unload_timeout_minutes * 60,
-            )
-            TranscriptionHandler._synthesizer = Synthesizer(tts_config)
-
-        return TranscriptionHandler._synthesizer
-
     def _handle_list_voices(self) -> None:
         """Handle GET /voices - list available voice presets."""
         try:
-            from voiced.voice_manager import VoiceManager
-
-            vm = VoiceManager()
+            vm = self.voiced.voice_manager
             available = vm.list_available()
             downloaded = set(vm.list_downloaded())
 
@@ -563,9 +451,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
     def _handle_get_voice(self, name: str) -> None:
         """Handle GET /voices/{name} - get voice info."""
         try:
-            from voiced.voice_manager import VoiceManager
-
-            vm = VoiceManager()
+            vm = self.voiced.voice_manager
 
             try:
                 info = vm.get_voice_info(name)
@@ -581,9 +467,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
     def _handle_download_voice(self, name: str) -> None:
         """Handle POST /voices/{name}/download - download voice preset."""
         try:
-            from voiced.voice_manager import VoiceManager
-
-            vm = VoiceManager()
+            vm = self.voiced.voice_manager
 
             logger.info(f"Downloading voice preset: {name}")
             path = vm.download(name, force=False)
@@ -607,7 +491,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
     def _handle_synthesize(self, query_string: str) -> None:
         """Handle POST /synthesize - synthesize speech from text."""
         # Check if TTS is enabled
-        synthesizer = self._get_synthesizer()
+        synthesizer = self.voiced.synthesizer
         if synthesizer is None:
             self._send_error_json(
                 503,
@@ -682,7 +566,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         import threading
 
         # Check if TTS is enabled
-        synthesizer = self._get_synthesizer()
+        synthesizer = self.voiced.synthesizer
         if synthesizer is None:
             self._send_error_json(
                 503,
@@ -909,20 +793,32 @@ class TranscriptionServer:
         host: str | None = None,
         port: int | None = None,
         config: Config | None = None,
+        voiced: Voiced | None = None,
     ):
         self.config = config or load_config()
         self.host = host or self.config.server.host
         self.port = port or self.config.server.port
-        self.transcriber = Transcriber(self.config.transcription)
+        self.voiced = voiced or Voiced.from_config(self.config)
         self._server: ThreadingHTTPServer | None = None
         self._thread: threading.Thread | None = None
         self._running = False
         self._asyncio_thread: threading.Thread | None = None
         self._asyncio_loop = None
 
+    @property
+    def transcriber(self) -> Transcriber:
+        """Backwards-compat — daemon does ``self._http_server.transcriber = ...`` to share."""
+        return self.voiced.transcriber
+
+    @transcriber.setter
+    def transcriber(self, value: Transcriber) -> None:
+        # The daemon shares its already-loaded Transcriber by setting this attribute.
+        # Replace the one in our Voiced so handlers see the same instance.
+        self.voiced.transcriber = value
+
     def _preload_model(self) -> None:
         logger.info("Pre-loading transcription model...")
-        self.transcriber.warmup()
+        self.voiced.transcriber.warmup()
         logger.info("Model loaded successfully")
 
     def _start_asyncio_loop(self) -> None:
@@ -935,21 +831,20 @@ class TranscriptionServer:
 
     def _init_webrtc(self) -> None:
         """Initialize WebRTC connection manager."""
-        # Start asyncio event loop in background thread
         self._asyncio_thread = threading.Thread(
             target=self._start_asyncio_loop, daemon=True, name="asyncio-webrtc"
         )
         self._asyncio_thread.start()
 
-        # Wait for event loop to be ready
         while self._asyncio_loop is None:
             time.sleep(0.01)
 
-        # Create WebRTC connection manager
+        # Pass the lazy accessors directly — WebRTC consumes them as the
+        # underlying objects, so any later lazy-load is reflected.
         webrtc_manager = WebRTCConnectionManager(
-            transcriber=self.transcriber,
-            synthesizer=TranscriptionHandler._synthesizer,
-            speaker_identifier=TranscriptionHandler._speaker_identifier,
+            transcriber=self.voiced.transcriber,
+            synthesizer=self.voiced._synthesizer,
+            speaker_identifier=self.voiced._speaker_identifier,
         )
         webrtc_manager.set_event_loop(self._asyncio_loop)
 
@@ -989,6 +884,12 @@ class TranscriptionServer:
 
         logger.info("WebRTC stopped")
 
+    def _wire_handler_class(self) -> None:
+        TranscriptionHandler.voiced = self.voiced
+        TranscriptionHandler.start_time = time.time()
+        TranscriptionHandler.request_count = 0
+        TranscriptionHandler.tts_request_count = 0
+
     def start(self, preload: bool = True) -> None:
         """Start the HTTP server."""
         if self._running:
@@ -997,18 +898,10 @@ class TranscriptionServer:
         if preload:
             self._preload_model()
 
-        TranscriptionHandler.transcriber = self.transcriber
-        TranscriptionHandler.config = self.config
-        TranscriptionHandler.start_time = time.time()
-        TranscriptionHandler.request_count = 0
-
-        # Initialize WebRTC
+        self._wire_handler_class()
         self._init_webrtc()
 
-        self._server = ThreadingHTTPServer(
-            (self.host, self.port),
-            TranscriptionHandler,
-        )
+        self._server = ThreadingHTTPServer((self.host, self.port), TranscriptionHandler)
         self._running = True
 
         logger.info(f"Starting HTTP server on {self.host}:{self.port}")
@@ -1022,18 +915,10 @@ class TranscriptionServer:
         if preload:
             self._preload_model()
 
-        TranscriptionHandler.transcriber = self.transcriber
-        TranscriptionHandler.config = self.config
-        TranscriptionHandler.start_time = time.time()
-        TranscriptionHandler.request_count = 0
-
-        # Initialize WebRTC
+        self._wire_handler_class()
         self._init_webrtc()
 
-        self._server = ThreadingHTTPServer(
-            (self.host, self.port),
-            TranscriptionHandler,
-        )
+        self._server = ThreadingHTTPServer((self.host, self.port), TranscriptionHandler)
         self._running = True
 
         self._thread = threading.Thread(target=self._server.serve_forever, daemon=True)
@@ -1047,7 +932,6 @@ class TranscriptionServer:
 
         self._running = False
 
-        # Stop WebRTC first
         self._stop_webrtc()
 
         if self._server:
@@ -1058,15 +942,11 @@ class TranscriptionServer:
             self._thread.join(timeout=5)
             self._thread = None
 
-        # Clean up speaker identifier if loaded
-        if TranscriptionHandler._speaker_identifier is not None:
-            TranscriptionHandler._speaker_identifier.unload()
-            TranscriptionHandler._speaker_identifier = None
-
-        # Clean up TTS synthesizer if loaded
-        if TranscriptionHandler._synthesizer is not None:
-            TranscriptionHandler._synthesizer.shutdown()
-            TranscriptionHandler._synthesizer = None
-
-        self.transcriber.unload()
+        # Voiced owns the model lifecycles; ask it to release them.
+        self.voiced.shutdown()
+        if self.voiced._speaker_identifier is not None:
+            try:
+                self.voiced._speaker_identifier.unload()
+            except Exception:
+                logger.exception("Speaker identifier unload failed")
         logger.info("HTTP server stopped")
