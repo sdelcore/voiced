@@ -46,8 +46,9 @@ class TestComposition:
 
     def test_lazy_caches_dont_construct_until_accessed(self, cfg):
         v = _voiced_with_mocks(cfg)
-        # speaker_identifier and voice_manager are lazy
+        # speaker_identifier, speaker_diarizer, and voice_manager are lazy
         assert v._speaker_identifier is None
+        assert v._speaker_diarizer is None
         assert v._voice_manager is None
 
 
@@ -81,63 +82,91 @@ class TestTranscribeWithSpeakers:
             model_version="v1",
         )
 
-    def test_no_profiles_falls_back_unlabeled(self, cfg):
-        v = _voiced_with_mocks(cfg)
-        v.profile_store.list.return_value = []  # no profiles → unlabeled
+    def _diarized(self, *, start, end, speaker, confidence=0.0):
+        # Stand-in for IdentifiedSegment from the diarizer
+        m = MagicMock()
+        m.start = start
+        m.end = end
+        m.text = ""
+        m.speaker = speaker
+        m.confidence = confidence
+        return m
 
-        out = v.transcribe(
-            np.zeros(16000, dtype=np.float32),
-            16000,
-            identify_speakers=True,
-        )
-        # No speaker identifier should have been touched
-        assert v._speaker_identifier is None
-        assert all(s.speaker == "Unknown" for s in out.segments)
-
-    def test_with_profiles_runs_identifier(self, cfg):
+    def test_with_profiles_runs_diarizer(self, cfg):
         v = _voiced_with_mocks(cfg)
         v.profile_store.list.return_value = [self._profile("alice")]
 
-        # Stub the speaker identifier so we don't load SpeechBrain
-        identified = [
-            MagicMock(start=0.0, end=1.0, text="hello", speaker="alice", confidence=0.9),
-            MagicMock(start=1.0, end=2.0, text="world", speaker="alice", confidence=0.8),
+        # Stub the diarizer so we don't load SpeechBrain
+        diar_segments = [
+            self._diarized(start=0.0, end=2.0, speaker="alice", confidence=0.9),
         ]
-        v._speaker_identifier = MagicMock()
-        v._speaker_identifier.identify_segments_from_array.return_value = identified
+        v._speaker_diarizer = MagicMock()
+        v._speaker_diarizer.diarize_and_match_profiles_from_array.return_value = diar_segments
 
         out = v.transcribe(
             np.zeros(16000, dtype=np.float32),
             16000,
             identify_speakers=True,
         )
+        # Both transcription segments overlap the single diarized segment → both are alice
         assert [s.speaker for s in out.segments] == ["alice", "alice"]
-        assert [s.speaker_confidence for s in out.segments] == [0.9, 0.8]
+        assert [s.speaker_confidence for s in out.segments] == [0.9, 0.9]
 
-    def test_identifier_failure_falls_back_unlabeled(self, cfg):
+    def test_no_profiles_runs_diarizer_with_cluster_labels(self, cfg):
+        v = _voiced_with_mocks(cfg)
+        v.profile_store.list.return_value = []
+        v._speaker_diarizer = MagicMock()
+        v._speaker_diarizer.diarize_and_match_profiles_from_array.return_value = [
+            self._diarized(start=0.0, end=1.0, speaker="SPEAKER_00"),
+            self._diarized(start=1.0, end=2.0, speaker="SPEAKER_01"),
+        ]
+        out = v.transcribe(
+            np.zeros(16000, dtype=np.float32),
+            16000,
+            identify_speakers=True,
+        )
+        # Each transcription segment aligns with its diarized window
+        assert out.segments[0].speaker == "SPEAKER_00"
+        assert out.segments[1].speaker == "SPEAKER_01"
+
+    def test_num_speakers_passed_to_diarizer(self, cfg):
+        v = _voiced_with_mocks(cfg)
+        v.profile_store.list.return_value = []
+        v._speaker_diarizer = MagicMock()
+        v._speaker_diarizer.diarize_and_match_profiles_from_array.return_value = []
+
+        v.transcribe(
+            np.zeros(16000, dtype=np.float32),
+            16000,
+            identify_speakers=True,
+            num_speakers=3,
+        )
+        kwargs = v._speaker_diarizer.diarize_and_match_profiles_from_array.call_args.kwargs
+        assert kwargs["num_speakers"] == 3
+
+    def test_diarizer_failure_falls_back_unlabeled(self, cfg):
         v = _voiced_with_mocks(cfg)
         v.profile_store.list.return_value = [self._profile("alice")]
-        v._speaker_identifier = MagicMock()
-        v._speaker_identifier.identify_segments_from_array.side_effect = RuntimeError("boom")
+        v._speaker_diarizer = MagicMock()
+        v._speaker_diarizer.diarize_and_match_profiles_from_array.side_effect = RuntimeError(
+            "boom"
+        )
 
         out = v.transcribe(
             np.zeros(16000, dtype=np.float32),
             16000,
             identify_speakers=True,
         )
-        # Falls back to unlabeled segments rather than raising
         assert all(s.speaker == "Unknown" for s in out.segments)
 
     def test_per_call_profile_store_override(self, cfg):
         v = _voiced_with_mocks(cfg)
-        # Default store is empty
         v.profile_store.list.return_value = []
-        # Override store has a profile
         override = MagicMock()
         override.list.return_value = [self._profile("bob")]
-        v._speaker_identifier = MagicMock()
-        v._speaker_identifier.identify_segments_from_array.return_value = [
-            MagicMock(start=0.0, end=1.0, text="hello", speaker="bob", confidence=0.7),
+        v._speaker_diarizer = MagicMock()
+        v._speaker_diarizer.diarize_and_match_profiles_from_array.return_value = [
+            self._diarized(start=0.0, end=2.0, speaker="bob", confidence=0.7),
         ]
 
         out = v.transcribe(
@@ -146,7 +175,6 @@ class TestTranscribeWithSpeakers:
             identify_speakers=True,
             profile_store=override,
         )
-        # Default store should not have been consulted
         v.profile_store.list.assert_not_called()
         override.list.assert_called_once()
         assert out.segments[0].speaker == "bob"

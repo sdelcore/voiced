@@ -478,10 +478,9 @@ def transcribe(
     click.echo(f"Transcribing: {audio_file}", err=True)
 
     try:
-        # Use HTTP mode if server URL is provided
         if server_url:
             click.echo(f"Using remote server: {server_url}", err=True)
-            _transcribe_remote(audio_file, output, server_url, timeout, annotate)
+            _transcribe_remote(audio_file, output, server_url, timeout, annotate, num_speakers)
         else:
             click.echo(f"Model: {config.transcription.model}", err=True)
             _transcribe_local(audio_file, output, config, device, annotate, num_speakers)
@@ -500,63 +499,49 @@ def _transcribe_remote(
     server_url: str,
     timeout: float,
     annotate: bool,
+    num_speakers: int | None,
 ) -> None:
-    """Transcribe using remote server via WebRTC."""
+    """Transcribe using a remote server over HTTP."""
     import soundfile as sf
 
-    from voiced.webrtc_client import SyncWebRTCClient, WebRTCClientConfig
+    from voiced.http_client import HttpConnectionError, ServerError, TranscriptionClient
+    from voiced.transcribe import RemoteTranscribe
 
-    # Load audio file
     audio, sample_rate = sf.read(str(audio_file), dtype="float32")
-
-    # Convert stereo to mono if needed
     if len(audio.shape) > 1:
         audio = audio.mean(axis=1)
 
-    config = WebRTCClientConfig(server_url=server_url, timeout=timeout)
-    client = SyncWebRTCClient(config)
+    click.echo(f"Sending audio to {server_url}...", err=True)
+    transcribe = RemoteTranscribe(TranscriptionClient(server_url, timeout=timeout))
 
     try:
-        click.echo("Connecting via WebRTC...", err=True)
-        client.connect()
-
-        # Server handles diarization when identify_speakers=True
-        result = client.batch_transcribe(
+        result = transcribe.transcribe(
             audio,
             sample_rate=sample_rate,
             identify_speakers=annotate,
-            timeout=timeout,
+            num_speakers=num_speakers,
         )
-
-        if annotate and result.segments:
-            # Format segments with speaker info
-            output_lines = []
-            for seg in result.segments:
-                start = seg.get("start", 0)
-                end = seg.get("end", 0)
-                speaker = seg.get("speaker", "Unknown")
-                text = seg.get("text", "").strip()
-                time_str = f"[{start:.2f}-{end:.2f}]"
-                output_lines.append(f"{time_str} {speaker}: {text}")
-            text = "\n".join(output_lines)
-        else:
-            text = result.text
-
-        if output:
-            with open(output, "w") as f:
-                f.write(text)
-            click.echo(f"Saved to: {output}", err=True)
-        else:
-            click.echo(text)
-
-    except Exception as e:
-        import traceback
-
-        click.echo(f"Error ({type(e).__name__}): {e}", err=True)
-        traceback.print_exc()
+    except ServerError as e:
+        click.echo(f"Server error: {e}", err=True)
         sys.exit(1)
-    finally:
-        client.disconnect()
+    except HttpConnectionError as e:
+        click.echo(f"Connection error: {e}", err=True)
+        sys.exit(1)
+
+    if annotate and result.segments:
+        text = "\n".join(
+            f"[{seg.start:.2f}-{seg.end:.2f}] {seg.speaker}: {seg.text.strip()}"
+            for seg in result.segments
+        )
+    else:
+        text = result.text
+
+    if output:
+        with open(output, "w") as f:
+            f.write(text)
+        click.echo(f"Saved to: {output}", err=True)
+    else:
+        click.echo(text)
 
 
 def _transcribe_local(
@@ -567,62 +552,31 @@ def _transcribe_local(
     annotate: bool,
     num_speakers: int | None,
 ) -> None:
-    """Transcribe using local model."""
-    from voiced.transcriber import Transcriber
+    """Transcribe a file with the local model via the Voiced facade."""
+    import soundfile as sf
 
-    transcriber = Transcriber(config.transcription)
+    from voiced.capabilities import Voiced
 
+    audio, sample_rate = sf.read(str(audio_file), dtype="float32")
+    if len(audio.shape) > 1:
+        audio = audio.mean(axis=1)
+
+    voiced = Voiced.from_config(config)
     if annotate:
-        from voiced.diarizer import (
-            SpeakerDiarizer,
-            align_transcription_with_diarization,
-        )
-        from voiced.profiles import ProfileManager
-
         click.echo("Running speaker diarization...", err=True)
+    result = voiced.transcribe(
+        audio,
+        sample_rate,
+        identify_speakers=annotate,
+        num_speakers=num_speakers,
+    )
 
-        # Run diarization first
-        diarizer = SpeakerDiarizer(
-            config=config.diarization,
-            device=device or config.diarization.device,
+    if annotate and result.segments:
+        text = "\n".join(
+            f"[{seg.start:.2f}-{seg.end:.2f}] {seg.speaker}: {seg.text}" for seg in result.segments
         )
-
-        # Load profiles for matching
-        pm = ProfileManager()
-        profiles = pm.load_all()
-        if profiles:
-            click.echo(f"Loaded {len(profiles)} voice profile(s)", err=True)
-            diar_segments = diarizer.diarize_and_match_profiles(
-                audio_file,
-                profiles,
-                num_speakers=num_speakers,
-            )
-        else:
-            diar_segments = diarizer.diarize_file(
-                audio_file,
-                num_speakers=num_speakers,
-            )
-
-        click.echo(f"Found {len(set(s.speaker for s in diar_segments))} speaker(s)", err=True)
-
-        # Get transcription segments
-        trans_segments = transcriber.transcribe_file_with_segments(audio_file)
-        click.echo(f"Found {len(trans_segments)} text segment(s)", err=True)
-
-        # Align transcription with diarization
-        result_segments = align_transcription_with_diarization(
-            trans_segments,
-            diar_segments,
-        )
-
-        output_lines = []
-        for seg in result_segments:
-            time_str = f"[{seg.start:.2f}-{seg.end:.2f}]"
-            output_lines.append(f"{time_str} {seg.speaker}: {seg.text}")
-
-        text = "\n".join(output_lines)
     else:
-        text = transcriber.transcribe_file(audio_file)
+        text = result.text
 
     if output:
         with open(output, "w") as f:
@@ -663,11 +617,9 @@ def record(
         voiced record --model large-v3 --device cuda
     """
     import signal
-    import tempfile
     import time
 
     from voiced.recorder import Recorder
-    from voiced.transcriber import Transcriber
 
     config = load_config()
 
@@ -714,79 +666,33 @@ def record(
     click.echo(f"Transcribing with model: {config.transcription.model}", err=True)
 
     try:
-        transcriber = Transcriber(config.transcription)
-        segments = transcriber.transcribe_audio_with_segments(
+        from voiced.capabilities import Voiced
+
+        voiced = Voiced.from_config(config)
+        if annotate:
+            click.echo("Running speaker diarization...", err=True)
+        result = voiced.transcribe(
             audio_data,
             config.audio.sample_rate,
+            identify_speakers=annotate,
+            num_speakers=num_speakers,
         )
 
-        click.echo(f"Found {len(segments)} segment(s)", err=True)
+        click.echo(f"Found {len(result.segments)} segment(s)", err=True)
 
         if annotate:
-            import soundfile as sf
-
-            from voiced.diarizer import (
-                SpeakerDiarizer,
-                align_transcription_with_diarization,
-            )
-            from voiced.profiles import ProfileManager
-
-            click.echo("Running speaker diarization...", err=True)
-
-            # Save audio to temp file for diarization (SpeechBrain requires file path)
-            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as f:
-                temp_path = Path(f.name)
-
-            try:
-                sf.write(str(temp_path), audio_data, config.audio.sample_rate)
-
-                diarizer = SpeakerDiarizer(
-                    config=config.diarization,
-                    device=device or config.diarization.device,
-                )
-
-                pm = ProfileManager()
-                profiles = pm.load_all()
-                if profiles:
-                    click.echo(f"Loaded {len(profiles)} voice profile(s)", err=True)
-                    diar_segments = diarizer.diarize_and_match_profiles(
-                        temp_path,
-                        profiles,
-                        num_speakers=num_speakers,
-                    )
-                else:
-                    diar_segments = diarizer.diarize_file(
-                        temp_path,
-                        num_speakers=num_speakers,
-                    )
-
-                click.echo(
-                    f"Found {len(set(s.speaker for s in diar_segments))} speaker(s)", err=True
-                )
-
-                # Align transcription with diarization
-                result_segments = align_transcription_with_diarization(
-                    segments,
-                    diar_segments,
-                )
-
-                output_lines = []
-                for seg in result_segments:
-                    start_ts = format_srt_timestamp(seg.start)
-                    end_ts = format_srt_timestamp(seg.end)
-                    output_lines.append(f"[{start_ts} --> {end_ts}] {seg.speaker}: {seg.text}")
-
-                text = "\n".join(output_lines)
-            finally:
-                temp_path.unlink(missing_ok=True)
-        else:
-            # Format without speaker diarization
             output_lines = []
-            for start, end, segment_text in segments:
-                start_ts = format_srt_timestamp(start)
-                end_ts = format_srt_timestamp(end)
-                output_lines.append(f"[{start_ts} --> {end_ts}] {segment_text}")
-
+            for seg in result.segments:
+                start_ts = format_srt_timestamp(seg.start)
+                end_ts = format_srt_timestamp(seg.end)
+                output_lines.append(f"[{start_ts} --> {end_ts}] {seg.speaker}: {seg.text}")
+            text = "\n".join(output_lines)
+        else:
+            output_lines = []
+            for seg in result.segments:
+                start_ts = format_srt_timestamp(seg.start)
+                end_ts = format_srt_timestamp(seg.end)
+                output_lines.append(f"[{start_ts} --> {end_ts}] {seg.text}")
             text = "\n".join(output_lines)
 
         if output:

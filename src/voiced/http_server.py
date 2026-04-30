@@ -197,6 +197,12 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         identify_speakers_param = query_params.get("identify_speakers", ["true"])[0]
         identify_speakers = identify_speakers_param.lower() == "true"
         profiles_path = query_params.get("profiles_path", [None])[0]
+        num_speakers_param = query_params.get("num_speakers", [None])[0]
+        try:
+            num_speakers = int(num_speakers_param) if num_speakers_param else None
+        except ValueError:
+            self._send_error_json(400, "num_speakers must be an integer", "INVALID_PARAM")
+            return
 
         audio_bytes = self.rfile.read(content_length)
 
@@ -283,6 +289,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
                 audio,
                 sample_rate,
                 identify_speakers=identify_speakers,
+                num_speakers=num_speakers,
                 profile_store=self._profile_store_for(profiles_path),
             )
             elapsed = time.time() - start_time
