@@ -455,34 +455,31 @@ class SpeakerDiarizer:
 
         return n_clusters
 
-    def diarize_file(
+    def diarize_from_array(
         self,
-        audio_path: str | Path,
+        audio: np.ndarray,
+        sample_rate: int,
         num_speakers: int | None = None,
     ) -> list[IdentifiedSegment]:
-        """Run diarization on an audio file.
+        """Run diarization directly on an in-memory audio array.
 
         Args:
-            audio_path: Path to audio file.
+            audio: float32 mono audio.
+            sample_rate: sample rate of ``audio``.
             num_speakers: Number of speakers (None = auto-detect).
 
         Returns:
-            List of IdentifiedSegment with speaker labels (SPEAKER_00, etc.).
+            List of IdentifiedSegment with cluster labels (SPEAKER_00, etc.).
         """
-        import soundfile as sf
         from sklearn.cluster import SpectralClustering
 
-        audio_path = Path(audio_path)
-        n_speakers = num_speakers if num_speakers is not None else self.config.num_speakers
-
-        logger.info(f"Diarizing {audio_path} (num_speakers={n_speakers})")
-
-        audio, sr = sf.read(str(audio_path))
         if len(audio.shape) > 1:
             audio = audio.mean(axis=1)
 
-        embeddings, timestamps = self._extract_windowed_embeddings(audio, sr)
+        n_speakers = num_speakers if num_speakers is not None else self.config.num_speakers
+        logger.info(f"Diarizing {len(audio) / sample_rate:.1f}s (num_speakers={n_speakers})")
 
+        embeddings, timestamps = self._extract_windowed_embeddings(audio, sample_rate)
         if len(embeddings) == 0:
             logger.warning("No embeddings extracted, audio may be too short")
             return []
@@ -508,7 +505,7 @@ class SpeakerDiarizer:
             )
             labels = cluster.fit_predict(embeddings)
 
-        results = []
+        results: list[IdentifiedSegment] = []
         if len(labels) > 0:
             current_speaker = int(labels[0])
             current_start = timestamps[0][0]
@@ -548,32 +545,31 @@ class SpeakerDiarizer:
         logger.info(f"Found {unique_speakers} speaker(s) in {len(results)} segments")
         return results
 
-    def diarize_and_match_profiles(
+    def diarize_file(
         self,
         audio_path: str | Path,
+        num_speakers: int | None = None,
+    ) -> list[IdentifiedSegment]:
+        """Run diarization on an audio file. Thin wrapper over ``diarize_from_array``."""
+        import soundfile as sf
+
+        audio, sr = sf.read(str(Path(audio_path)))
+        return self.diarize_from_array(audio, sr, num_speakers)
+
+    def diarize_and_match_profiles_from_array(
+        self,
+        audio: np.ndarray,
+        sample_rate: int,
         profiles: list[VoiceProfile] | None = None,
         num_speakers: int | None = None,
     ) -> list[IdentifiedSegment]:
-        """Run diarization and match speakers to registered profiles.
-
-        Args:
-            audio_path: Path to audio file.
-            profiles: Voice profiles to match against.
-            num_speakers: Number of speakers (None = auto-detect).
-
-        Returns:
-            List of IdentifiedSegment with profile names where matched.
-        """
-        import soundfile as sf
-
-        diar_segments = self.diarize_file(audio_path, num_speakers)
-
-        if not profiles:
-            return diar_segments
-
-        audio, sr = sf.read(str(audio_path))
+        """Diarize an audio array and match each speaker cluster to a profile."""
         if len(audio.shape) > 1:
             audio = audio.mean(axis=1)
+
+        diar_segments = self.diarize_from_array(audio, sample_rate, num_speakers)
+        if not profiles:
+            return diar_segments
 
         speaker_segments: dict[str, list[IdentifiedSegment]] = {}
         for seg in diar_segments:
@@ -588,12 +584,12 @@ class SpeakerDiarizer:
             if (best_seg.end - best_seg.start) < self.config.min_segment_duration:
                 continue
 
-            start_sample = int(best_seg.start * sr)
-            end_sample = int(best_seg.end * sr)
+            start_sample = int(best_seg.start * sample_rate)
+            end_sample = int(best_seg.end * sample_rate)
             segment_audio = audio[start_sample:end_sample]
 
             try:
-                embedding = self.embedder.extract_embedding_from_array(segment_audio, sr)
+                embedding = self.embedder.extract_embedding_from_array(segment_audio, sample_rate)
                 best_match = None
                 best_score = -1.0
 
@@ -611,7 +607,7 @@ class SpeakerDiarizer:
             except Exception as e:
                 logger.warning(f"Failed to extract embedding for {speaker_label}: {e}")
 
-        results = []
+        results: list[IdentifiedSegment] = []
         for seg in diar_segments:
             if seg.speaker in speaker_mapping:
                 name, confidence = speaker_mapping[seg.speaker]
@@ -628,6 +624,18 @@ class SpeakerDiarizer:
                 results.append(seg)
 
         return results
+
+    def diarize_and_match_profiles(
+        self,
+        audio_path: str | Path,
+        profiles: list[VoiceProfile] | None = None,
+        num_speakers: int | None = None,
+    ) -> list[IdentifiedSegment]:
+        """File-based wrapper over ``diarize_and_match_profiles_from_array``."""
+        import soundfile as sf
+
+        audio, sr = sf.read(str(Path(audio_path)))
+        return self.diarize_and_match_profiles_from_array(audio, sr, profiles, num_speakers)
 
     def unload(self) -> None:
         """Unload models to free memory."""

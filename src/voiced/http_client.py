@@ -52,6 +52,7 @@ class TranscriptionClient:
         sample_rate: int = 16000,
         language: str | None = None,
         identify_speakers: bool = True,
+        num_speakers: int | None = None,
     ) -> dict:
         """Send audio to server for transcription.
 
@@ -60,6 +61,8 @@ class TranscriptionClient:
             sample_rate: Sample rate of the audio.
             language: Optional language code to use.
             identify_speakers: Whether to identify speakers (default True).
+            num_speakers: Optional speaker-count hint for diarization
+                (auto-detected when None).
 
         Returns:
             Full response dict with text, segments, speaker info.
@@ -75,6 +78,8 @@ class TranscriptionClient:
         params = {"identify_speakers": str(identify_speakers).lower()}
         if language:
             params["language"] = language
+        if num_speakers is not None:
+            params["num_speakers"] = str(num_speakers)
 
         url = f"{self.server_url}/transcribe?{urlencode(params)}"
 

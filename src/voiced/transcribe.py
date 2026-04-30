@@ -27,6 +27,7 @@ class Transcribe(Protocol):
         sample_rate: int,
         *,
         identify_speakers: bool = False,
+        num_speakers: int | None = None,
     ) -> TranscribeOutput: ...
 
 
@@ -43,11 +44,13 @@ class RemoteTranscribe:
         sample_rate: int,
         *,
         identify_speakers: bool = False,
+        num_speakers: int | None = None,
     ) -> TranscribeOutput:
         result = self._client.transcribe(
             audio,
             sample_rate=sample_rate,
             identify_speakers=identify_speakers,
+            num_speakers=num_speakers,
         )
         segments = [
             TranscribedSegment(

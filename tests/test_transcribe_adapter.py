@@ -46,6 +46,19 @@ class TestRemoteTranscribe:
         assert kwargs["sample_rate"] == 8000
         assert kwargs["identify_speakers"] is True
 
+    def test_passes_num_speakers(self):
+        client = self._client()
+        client.transcribe.return_value = {"text": "", "segments": [], "duration": 0.0}
+        adapter = RemoteTranscribe(client)
+        adapter.transcribe(
+            np.zeros(8000, dtype=np.float32),
+            8000,
+            identify_speakers=True,
+            num_speakers=3,
+        )
+        kwargs = client.transcribe.call_args.kwargs
+        assert kwargs["num_speakers"] == 3
+
     def test_speaker_fields_preserved_when_present(self):
         client = self._client()
         client.transcribe.return_value = {

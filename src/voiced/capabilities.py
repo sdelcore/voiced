@@ -63,7 +63,8 @@ class Voiced:
 
         # Lazily constructed — touched only when first accessed
         self._synthesizer = None
-        self._speaker_identifier = None
+        self._speaker_identifier = None  # used by webrtc_server for real-time
+        self._speaker_diarizer = None  # used here for batch transcribe
         self._voice_manager = None
 
     @classmethod
@@ -104,12 +105,21 @@ class Voiced:
 
     @property
     def speaker_identifier(self):
-        """The speaker identifier. Lazily constructed."""
+        """The per-segment speaker identifier. Used by WebRTC for real-time matching."""
         if self._speaker_identifier is None:
             from voiced.diarizer import SpeakerIdentifier
 
             self._speaker_identifier = SpeakerIdentifier(config=self.config.diarization)
         return self._speaker_identifier
+
+    @property
+    def speaker_diarizer(self):
+        """The clustering diarizer. Used by batch transcribe (CLI + HTTP /transcribe)."""
+        if self._speaker_diarizer is None:
+            from voiced.diarizer import SpeakerDiarizer
+
+            self._speaker_diarizer = SpeakerDiarizer(config=self.config.diarization)
+        return self._speaker_diarizer
 
     @property
     def voice_manager(self):
@@ -128,57 +138,66 @@ class Voiced:
         sample_rate: int,
         *,
         identify_speakers: bool = False,
+        num_speakers: int | None = None,
         profile_store: ProfileStore | None = None,
     ) -> TranscribeOutput:
-        """Transcribe audio, optionally identifying speakers against profiles.
+        """Transcribe audio with optional speaker diarization.
 
         Args:
             audio: float32 mono audio.
             sample_rate: sample rate of ``audio``.
-            identify_speakers: if True, run speaker identification against
-                the profiles in ``profile_store`` (or this Voiced's default
-                store) and return per-segment speaker labels.
+            identify_speakers: if True, run clustering diarization on the
+                full audio, match clusters to profiles, and align with
+                transcription segments. Unmatched clusters surface as
+                ``SPEAKER_00``, ``SPEAKER_01`` etc.
+            num_speakers: hint for the diarizer; auto-detected when None.
             profile_store: override the default profile store for this call —
                 used by the HTTP handler when a request specifies a custom
                 profiles path.
         """
+        from voiced.diarizer import align_transcription_with_diarization
+
         segments_raw = self.transcriber.transcribe_audio_with_segments(audio, sample_rate)
         full_text = " ".join(t for _, _, t in segments_raw).strip()
         duration = len(audio) / sample_rate if sample_rate else 0.0
 
-        segments: list[TranscribedSegment] = []
+        if not identify_speakers or not segments_raw:
+            return TranscribeOutput(
+                text=full_text,
+                segments=_segments_unlabeled(segments_raw),
+                duration=duration,
+            )
 
-        if identify_speakers and segments_raw:
-            store = profile_store or self.profile_store
-            try:
-                profiles = store.list()
-            except Exception:
-                logger.exception("Failed to load profiles for speaker ID")
-                profiles = []
+        store = profile_store or self.profile_store
+        try:
+            profiles = store.list()
+        except Exception:
+            logger.exception("Failed to load profiles for speaker ID")
+            profiles = []
 
-            if profiles:
-                try:
-                    identified = self.speaker_identifier.identify_segments_from_array(
-                        audio, sample_rate, segments_raw, profiles
-                    )
-                    for seg in identified:
-                        segments.append(
-                            TranscribedSegment(
-                                start=round(seg.start, 2),
-                                end=round(seg.end, 2),
-                                text=seg.text,
-                                speaker=seg.speaker,
-                                speaker_confidence=round(seg.confidence, 2),
-                            )
-                        )
-                except Exception:
-                    logger.exception("Speaker identification failed; returning unlabeled segments")
-                    segments = _segments_unlabeled(segments_raw)
-            else:
-                segments = _segments_unlabeled(segments_raw)
-        else:
-            segments = _segments_unlabeled(segments_raw)
+        try:
+            diar_segments = self.speaker_diarizer.diarize_and_match_profiles_from_array(
+                audio, sample_rate, profiles=profiles, num_speakers=num_speakers
+            )
+        except Exception:
+            logger.exception("Diarization failed; returning unlabeled segments")
+            return TranscribeOutput(
+                text=full_text,
+                segments=_segments_unlabeled(segments_raw),
+                duration=duration,
+            )
 
+        aligned = align_transcription_with_diarization(segments_raw, diar_segments)
+        segments = [
+            TranscribedSegment(
+                start=round(seg.start, 2),
+                end=round(seg.end, 2),
+                text=seg.text,
+                speaker=seg.speaker,
+                speaker_confidence=round(seg.confidence, 2),
+            )
+            for seg in aligned
+        ]
         return TranscribeOutput(text=full_text, segments=segments, duration=duration)
 
     # ----- lifecycle -----
