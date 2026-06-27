@@ -34,6 +34,7 @@ class TestTranscriberConfig:
         assert config.model == "nvidia/parakeet-tdt-0.6b-v3"
         assert config.device == "auto"
         assert config.language == "en"
+        assert config.unload_timeout_minutes == 15
 
     def test_custom_config(self):
         config = TranscriptionConfig(
@@ -55,6 +56,14 @@ class TestTranscriberInit:
         config = TranscriptionConfig(model="nvidia/parakeet-tdt-0.6b-v2")
         transcriber = Transcriber(config)
         assert transcriber.config.model == "nvidia/parakeet-tdt-0.6b-v2"
+
+    def test_idle_timeout_from_minutes(self):
+        transcriber = Transcriber(TranscriptionConfig(unload_timeout_minutes=15))
+        assert transcriber._host._idle_timeout == 15 * 60
+
+    def test_idle_timeout_disabled(self):
+        transcriber = Transcriber(TranscriptionConfig(unload_timeout_minutes=0))
+        assert transcriber._host._idle_timeout is None
 
     def test_device_explicit(self):
         config = TranscriptionConfig(device="cpu")
