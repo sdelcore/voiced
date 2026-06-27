@@ -73,7 +73,10 @@ class Voiced:
         cfg = config or load_config()
         return cls(
             config=cfg,
-            transcriber=Transcriber(cfg.transcription),
+            transcriber=Transcriber(
+                cfg.transcription,
+                unload_timeout_minutes=cfg.unload_timeout_minutes,
+            ),
             profile_store=LocalProfileStore(diarization_config=cfg.diarization),
         )
 
@@ -98,7 +101,7 @@ class Voiced:
             device=self.config.tts.device,
             default_voice=self.config.tts.default_voice,
             cfg_scale=self.config.tts.cfg_scale,
-            unload_timeout_seconds=self.config.tts.unload_timeout_minutes * 60,
+            unload_timeout_seconds=self.config.unload_timeout_minutes * 60,
         )
         self._synthesizer = Synthesizer(tts_config)
         return self._synthesizer

@@ -27,20 +27,25 @@ def _empty_cuda_cache(_model: Any) -> None:
 class Transcriber:
     """Wrapper around NeMo Parakeet-TDT for speech-to-text transcription."""
 
-    def __init__(self, config: TranscriptionConfig | None = None):
+    def __init__(
+        self,
+        config: TranscriptionConfig | None = None,
+        *,
+        unload_timeout_minutes: int = 15,
+    ):
         """Initialize the transcriber.
 
         Args:
             config: Transcription configuration. Uses defaults if not provided.
+            unload_timeout_minutes: Auto-unload the model after this many minutes
+                idle (0 = never). Shared with TTS via the app config.
         """
         self.config = config or TranscriptionConfig()
         self._device: str | None = None
         self._host: ModelHost[Any] = ModelHost(
             loader=self._load_model,
             idle_timeout=(
-                self.config.unload_timeout_minutes * 60
-                if self.config.unload_timeout_minutes > 0
-                else None
+                unload_timeout_minutes * 60 if unload_timeout_minutes > 0 else None
             ),
             on_unload=_empty_cuda_cache,
             name=f"parakeet({self.config.model})",

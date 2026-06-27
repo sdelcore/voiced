@@ -1169,7 +1169,7 @@ def _speak_local(
         device=config.tts.device,
         default_voice=voice or config.tts.default_voice,
         cfg_scale=cfg_scale if cfg_scale is not None else config.tts.cfg_scale,
-        unload_timeout_seconds=config.tts.unload_timeout_minutes * 60,
+        unload_timeout_seconds=config.unload_timeout_minutes * 60,
     )
 
     synthesizer = Synthesizer(tts_config)

@@ -17,7 +17,6 @@ class TranscriptionConfig:
     model: str = "nvidia/parakeet-tdt-0.6b-v3"
     device: str = "auto"
     language: str = "en"
-    unload_timeout_minutes: int = 15  # Auto-unload model after inactivity (0 = never)
 
 
 @dataclass
@@ -52,7 +51,6 @@ class TTSConfig:
     device: str = "auto"  # auto, cuda, mps, cpu
     default_voice: str = "emma"
     cfg_scale: float = 1.5  # Classifier-free guidance scale
-    unload_timeout_minutes: int = 60  # Auto-unload model after inactivity (0 = never)
 
 
 @dataclass
@@ -91,6 +89,9 @@ class ClientConfig:
 @dataclass
 class Config:
     """Main configuration container."""
+
+    # Shared across STT and TTS so the two model lifecycles never drift.
+    unload_timeout_minutes: int = 15  # Auto-unload idle models (0 = never)
 
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -157,6 +158,9 @@ def load_config() -> Config:
 
     config = Config()
 
+    if "unload_timeout_minutes" in data:
+        config.unload_timeout_minutes = data["unload_timeout_minutes"]
+
     if "transcription" in data:
         for key, value in data["transcription"].items():
             if hasattr(config.transcription, key):
@@ -219,11 +223,14 @@ def save_default_config() -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     default_config = """\
+# Auto-unload idle STT/TTS models from the GPU after this many minutes (0 = never).
+# Shared by both so they always match.
+unload_timeout_minutes = 15
+
 [transcription]
 model = "nvidia/parakeet-tdt-0.6b-v3"  # NeMo ASRModel HF id
 device = "auto"          # auto, cuda, cpu
 language = "en"          # advisory only; Parakeet TDT v3 auto-detects
-unload_timeout_minutes = 15  # Auto-unload model after inactivity (0 = never)
 
 [audio]
 sample_rate = 16000
@@ -246,7 +253,6 @@ model = "microsoft/VibeVoice-Realtime-0.5B"
 device = "auto"          # auto, cuda, mps, cpu
 default_voice = "emma"   # carter, davis, emma, frank, grace, mike
 cfg_scale = 1.5          # Classifier-free guidance scale
-unload_timeout_minutes = 60  # Auto-unload after inactivity (0 = never)
 
 [daemon]
 http_enabled = false     # Start HTTP server alongside Unix socket
