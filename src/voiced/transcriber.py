@@ -37,6 +37,11 @@ class Transcriber:
         self._device: str | None = None
         self._host: ModelHost[Any] = ModelHost(
             loader=self._load_model,
+            idle_timeout=(
+                self.config.unload_timeout_minutes * 60
+                if self.config.unload_timeout_minutes > 0
+                else None
+            ),
             on_unload=_empty_cuda_cache,
             name=f"parakeet({self.config.model})",
         )

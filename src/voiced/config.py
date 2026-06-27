@@ -17,6 +17,7 @@ class TranscriptionConfig:
     model: str = "nvidia/parakeet-tdt-0.6b-v3"
     device: str = "auto"
     language: str = "en"
+    unload_timeout_minutes: int = 15  # Auto-unload model after inactivity (0 = never)
 
 
 @dataclass
@@ -222,6 +223,7 @@ def save_default_config() -> None:
 model = "nvidia/parakeet-tdt-0.6b-v3"  # NeMo ASRModel HF id
 device = "auto"          # auto, cuda, cpu
 language = "en"          # advisory only; Parakeet TDT v3 auto-detects
+unload_timeout_minutes = 15  # Auto-unload model after inactivity (0 = never)
 
 [audio]
 sample_rate = 16000
