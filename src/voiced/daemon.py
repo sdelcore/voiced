@@ -20,6 +20,7 @@ from voiced.recording_session import (
     TranscriptionResult,
 )
 from voiced.server import Server
+from voiced.transcriber import STT_MODEL
 from voiced.tray import TrayIcon, TrayState
 
 logger = logging.getLogger(__name__)
@@ -202,7 +203,7 @@ class Daemon:
             "state": state.value,
             "transcribing": state == SessionState.TRANSCRIBING,
             "history_count": len(self._history.get_all()),
-            "model": self.config.transcription.model,
+            "model": STT_MODEL,
             "device": self.config.transcription.device,
         }
 

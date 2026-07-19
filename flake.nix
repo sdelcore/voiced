@@ -35,6 +35,7 @@
           xorg.xorgproto
           wtype
           wl-clipboard
+          espeak-ng
           stdenv.cc.cc.lib
           cacert
           zlib
@@ -51,10 +52,6 @@
           pygobject3
           pycairo
         ]);
-
-        # Pin VibeVoice — upstream has no tagged releases yet, so we pin a commit.
-        # main @ 2026-04 (current HEAD).
-        vibevoiceRev = "e73d1e17c3754f046352014856a922f8208fb5d3";
 
         # Source bundle for installation
         voicedSrc = pkgs.stdenv.mkDerivation {
@@ -104,10 +101,6 @@
             # PyGObject removed from deps - provided by pythonEnv system-site-packages
             ${pkgs.uv}/bin/uv pip install "$SOURCE_DIR" --quiet
 
-            # Install VibeVoice for TTS support (pinned)
-            echo "Installing VibeVoice for TTS..."
-            ${pkgs.uv}/bin/uv pip install "git+https://github.com/microsoft/VibeVoice.git@${vibevoiceRev}" --quiet
-
             echo "$CURRENT_VERSION" > "$VERSION_FILE"
             echo "Setup complete!"
           fi
@@ -149,6 +142,7 @@
             cairo
             wtype
             wl-clipboard
+            espeak-ng
             ruff
           ];
 

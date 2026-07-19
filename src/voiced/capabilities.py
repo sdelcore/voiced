@@ -88,19 +88,18 @@ class Voiced:
         if self._synthesizer is not None:
             return self._synthesizer
 
-        from voiced.synthesizer import Synthesizer, TTSConfig, check_vibevoice_installed
+        from voiced.synthesizer import Synthesizer, TTSConfig, check_kokoro_installed
 
         if not self.config.tts.enabled:
             return None
-        if not check_vibevoice_installed():
-            logger.warning("VibeVoice is not installed; TTS unavailable")
+        if not check_kokoro_installed():
+            logger.warning("Kokoro is not installed; TTS unavailable")
             return None
 
         tts_config = TTSConfig(
-            model_path=self.config.tts.model,
             device=self.config.tts.device,
             default_voice=self.config.tts.default_voice,
-            cfg_scale=self.config.tts.cfg_scale,
+            speed=self.config.tts.speed,
             unload_timeout_seconds=self.config.unload_timeout_minutes * 60,
         )
         self._synthesizer = Synthesizer(tts_config)

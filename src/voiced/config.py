@@ -12,9 +12,8 @@ except ImportError:
 
 @dataclass
 class TranscriptionConfig:
-    """Transcription settings."""
+    """Transcription settings. The model is fixed (see transcriber.STT_MODEL)."""
 
-    model: str = "nvidia/parakeet-tdt-0.6b-v3"
     device: str = "auto"
     language: str = "en"
     # Words the model habitually gets wrong, mapped to their fix.
@@ -39,7 +38,6 @@ class DiarizationConfig:
     device: str = "auto"  # auto, cuda, cpu
     similarity_threshold: float = 0.5  # Profile matching threshold
     min_segment_duration: float = 0.5  # Minimum segment length for embedding (seconds)
-    model: str = "speechbrain/spkrec-ecapa-voxceleb"  # SpeechBrain embedding model
     num_speakers: int | None = None  # Number of speakers (None = auto-detect)
     clustering_threshold: float = 0.7  # Clustering threshold when num_speakers is None
     profiles_path: str | None = None  # Custom profiles directory path
@@ -47,13 +45,12 @@ class DiarizationConfig:
 
 @dataclass
 class TTSConfig:
-    """Text-to-Speech settings."""
+    """Text-to-Speech settings. The model is fixed (see synthesizer.TTS_MODEL)."""
 
     enabled: bool = True
-    model: str = "microsoft/VibeVoice-Realtime-0.5B"
-    device: str = "auto"  # auto, cuda, mps, cpu
-    default_voice: str = "emma"
-    cfg_scale: float = 1.5  # Classifier-free guidance scale
+    device: str = "auto"  # auto, cuda, cpu
+    default_voice: str = "af_heart"
+    speed: float = 1.0  # Speech rate multiplier
 
 
 @dataclass
@@ -231,7 +228,6 @@ def save_default_config() -> None:
 unload_timeout_minutes = 15
 
 [transcription]
-model = "nvidia/parakeet-tdt-0.6b-v3"  # NeMo ASRModel HF id
 device = "auto"          # auto, cuda, cpu
 language = "en"          # advisory only; Parakeet TDT v3 auto-detects
 
@@ -251,17 +247,15 @@ beep_enabled = true      # audio feedback on start/stop
 device = "auto"          # auto, cuda, cpu
 similarity_threshold = 0.5  # Profile matching threshold (0-1)
 min_segment_duration = 0.5  # Minimum segment length for embedding (seconds)
-# model = "speechbrain/spkrec-ecapa-voxceleb"  # SpeechBrain embedding model
 # num_speakers = 2       # Set if known, leave unset for auto-detect
 # clustering_threshold = 0.7  # Clustering threshold when num_speakers is None
 # profiles_path = "/path/to/profiles"  # Custom profiles directory
 
 [tts]
-enabled = true           # Enable TTS (requires VibeVoice)
-model = "microsoft/VibeVoice-Realtime-0.5B"
-device = "auto"          # auto, cuda, mps, cpu
-default_voice = "emma"   # carter, davis, emma, frank, grace, mike
-cfg_scale = 1.5          # Classifier-free guidance scale
+enabled = true              # Enable TTS (requires kokoro)
+device = "auto"             # auto, cuda, cpu
+default_voice = "af_heart"  # see `voiced voices list`
+speed = 1.0                 # Speech rate multiplier
 
 [daemon]
 http_enabled = false     # Start HTTP server alongside Unix socket

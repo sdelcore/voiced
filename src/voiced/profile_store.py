@@ -49,7 +49,6 @@ class LocalProfileStore:
             from voiced.diarizer import SpeakerEmbedder
 
             self._embedder = SpeakerEmbedder(
-                model_source=self._diar_cfg.model,
                 device=self._device or self._diar_cfg.device,
             )
         return self._embedder

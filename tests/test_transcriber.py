@@ -31,30 +31,19 @@ def _fake_result(
 class TestTranscriberConfig:
     def test_default_config(self):
         config = TranscriptionConfig()
-        assert config.model == "nvidia/parakeet-tdt-0.6b-v3"
         assert config.device == "auto"
         assert config.language == "en"
+        assert config.replacements == {}
 
     def test_custom_config(self):
-        config = TranscriptionConfig(
-            model="nvidia/parakeet-tdt-0.6b-v2",
-            device="cpu",
-            language="en",
-        )
-        assert config.model == "nvidia/parakeet-tdt-0.6b-v2"
+        config = TranscriptionConfig(device="cpu", language="en")
         assert config.device == "cpu"
 
 
 class TestTranscriberInit:
     def test_init(self):
         transcriber = Transcriber()
-        assert transcriber.config.model == "nvidia/parakeet-tdt-0.6b-v3"
         assert not transcriber._host.is_loaded  # Lazy load
-
-    def test_init_with_config(self):
-        config = TranscriptionConfig(model="nvidia/parakeet-tdt-0.6b-v2")
-        transcriber = Transcriber(config)
-        assert transcriber.config.model == "nvidia/parakeet-tdt-0.6b-v2"
 
     def test_idle_timeout_from_minutes(self):
         transcriber = Transcriber(unload_timeout_minutes=15)

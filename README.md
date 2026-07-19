@@ -18,8 +18,8 @@ A voice daemon for Linux/Wayland providing both **Speech-to-Text (STT)** and **T
 - Voice profile matching for speaker identification
 
 ### TTS (Text-to-Speech)
-- High-quality synthesis using VibeVoice
-- Multiple voice presets (emma, mike, carter, davis, frank, grace)
+- High-quality synthesis using Kokoro-82M
+- 28 English voice packs (American + British accents)
 - Low-latency streaming playback
 - Speak from clipboard or stdin
 - Save audio to file
@@ -50,9 +50,6 @@ This will automatically set up the development environment with:
 uv venv
 source .venv/bin/activate
 uv pip install -e ".[dev]"
-
-# For TTS support, also install VibeVoice:
-pip install git+https://github.com/microsoft/VibeVoice.git
 ```
 
 ## Usage
@@ -89,15 +86,15 @@ voiced speak --stream "Low latency streaming"   # Streaming playback
 voiced speak --clipboard                         # Speak clipboard contents
 echo "Hello" | voiced speak --stdin              # From stdin
 voiced speak "Save this" -o output.wav           # Save to file
-voiced speak "Hello" --voice mike                # Different voice
+voiced speak "Hello" --voice am_michael          # Different voice
 ```
 
 Manage voice presets:
 ```bash
-voiced voices                    # List available voices
-voiced voices download emma      # Download a voice preset
-voiced voices info emma          # Show voice details
-voiced voices remove emma        # Remove cached voice
+voiced voices                       # List available voices
+voiced voices download af_heart     # Download a voice pack
+voiced voices info af_heart         # Show voice details
+voiced voices remove af_heart       # Remove cached voice
 ```
 
 ### Daemon with HTTP API
@@ -152,7 +149,7 @@ curl -X POST -H "Content-Type: audio/wav" \
 
 # TTS synthesis
 curl -X POST -H "Content-Type: application/json" \
-  -d '{"text": "Hello world", "voice": "emma"}' \
+  -d '{"text": "Hello world", "voice": "af_heart"}' \
   http://localhost:8765/synthesize --output speech.wav
 ```
 
@@ -179,7 +176,6 @@ Transcribe an audio file:
 ```bash
 voiced transcribe audio.wav                    # Output to stdout
 voiced transcribe audio.mp3 -o transcript.txt  # Output to file
-voiced transcribe audio.wav --model large-v3   # Use a specific model
 voiced transcribe meeting.wav --annotate --num-speakers 3  # With diarization
 ```
 
@@ -218,10 +214,19 @@ voiced config --init
 Configuration file: `~/.config/voiced/config.toml`
 
 ```toml
+# Auto-unload idle STT/TTS models from the GPU after this many minutes
+# (0 = never). Shared by both so they always match.
+unload_timeout_minutes = 15
+
 [transcription]
-model = "nvidia/parakeet-tdt-0.6b-v3"  # NeMo ASRModel HF id
 device = "auto"          # auto, cuda, cpu
 language = "en"          # advisory only; Parakeet TDT v3 auto-detects
+
+# Fix words the model habitually mishears (case-insensitive,
+# word-boundary matched)
+[transcription.replacements]
+"cloud code" = "Claude Code"
+"hyperland" = "Hyprland"
 
 [audio]
 sample_rate = 16000
@@ -230,12 +235,10 @@ device = "default"
 beep_enabled = true
 
 [tts]
-enabled = true           # Enable TTS (requires VibeVoice)
-model = "microsoft/VibeVoice-Realtime-0.5B"
-device = "auto"          # auto, cuda, mps, cpu
-default_voice = "emma"   # carter, davis, emma, frank, grace, mike
-cfg_scale = 1.5          # Classifier-free guidance scale
-unload_timeout_minutes = 60  # Auto-unload after inactivity
+enabled = true              # Enable TTS (requires kokoro)
+device = "auto"             # auto, cuda, cpu
+default_voice = "af_heart"  # see `voiced voices list`
+speed = 1.0                 # Speech rate multiplier
 
 [diarization]
 device = "auto"          # auto, cuda, cpu
@@ -277,13 +280,13 @@ pip install voiced
 ```python
 from voiced import Transcriber, TranscriptionConfig
 
-# Use defaults (base model, auto device detection)
+# Use defaults (Parakeet-TDT v3, auto device detection)
 transcriber = Transcriber()
 text = transcriber.transcribe_file("audio.wav")
 print(text)
 
 # Or with custom config
-config = TranscriptionConfig(model="large-v3", device="cuda", language="en")
+config = TranscriptionConfig(device="cuda", language="en")
 transcriber = Transcriber(config)
 text = transcriber.transcribe_file("audio.wav")
 ```
@@ -306,7 +309,7 @@ for start, end, text in segments:
 from voiced.synthesizer import Synthesizer, TTSConfig
 
 # Create synthesizer with config
-config = TTSConfig(default_voice="emma", device="cuda")
+config = TTSConfig(default_voice="af_heart", device="cuda")
 synth = Synthesizer(config)
 
 # Generate audio
@@ -370,21 +373,16 @@ audio = recorder.stop()  # Returns numpy array
 
 ## Models
 
-### STT Models (NVIDIA NeMo)
+The backends are fixed — one STT model, one TTS model, not configurable.
 
-| Model | Params | Notes |
-|-------|--------|-------|
-| `nvidia/parakeet-tdt-0.6b-v3` | 600M | Default. 25 European languages, auto-detect, WER 6.3% on Open ASR |
-| `nvidia/parakeet-tdt-0.6b-v2` | 600M | Prior version, English-only |
-| `nvidia/canary-1b-v2` | 1B | Multilingual + AST when accuracy matters more than speed |
+| Role | Model | Params | Notes |
+|------|-------|--------|-------|
+| STT | `nvidia/parakeet-tdt-0.6b-v3` | 600M | 25 European languages, auto-detect, WER 6.3% on Open ASR, ~3300x realtime |
+| TTS | `hexgrad/Kokoro-82M` | 82M | ~330MB, Apache 2.0, 24kHz output, runs on CPU too |
 
-### TTS Model (VibeVoice)
-
-| Model | Size | Quality |
-|-------|------|---------|
-| VibeVoice-Realtime-0.5B | ~1GB | High quality, near real-time |
-
-Available voices: `carter`, `davis`, `emma`, `frank`, `grace`, `mike`
+TTS voices are ~500KB packs downloaded on demand. Prefix encodes
+accent + gender: `af_`/`am_` American, `bf_`/`bm_` British.
+See `voiced voices list` for all 28.
 
 ## Architecture
 
@@ -402,7 +400,7 @@ CLI (voiced toggle) → Unix Socket → Daemon
 CLI (voiced toggle) → Unix Socket → Daemon
                                      ├── Recorder (sounddevice)
                                      ├── Transcriber (Parakeet-TDT) ←───┐
-                                     ├── Synthesizer (VibeVoice) ←──────┤ shared
+                                     ├── Synthesizer (Kokoro) ←─────────┤ shared
                                      ├── Injector (wl-clipboard)        │
                                      ├── Tray Icon (D-Bus SNI)          │
                                      └── HTTP Server ───────────────────┘

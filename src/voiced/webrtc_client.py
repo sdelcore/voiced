@@ -444,7 +444,7 @@ class WebRTCClient:
         return STTResult(text="", segments=[], is_final=True)
 
     async def speak(
-        self, text: str, voice: str | None = None, cfg_scale: float | None = None
+        self, text: str, voice: str | None = None, speed: float | None = None
     ) -> None:
         """Synthesize and play text via TTS."""
         if not self._connected or not self._data_channel:
@@ -455,8 +455,8 @@ class WebRTCClient:
         message = {"type": "tts_start", "text": text}
         if voice:
             message["voice"] = voice
-        if cfg_scale is not None:
-            message["cfg_scale"] = cfg_scale
+        if speed is not None:
+            message["speed"] = speed
 
         self._data_channel.send(json.dumps(message))
         logger.info(f"TTS started: {text[:50]}...")
@@ -591,7 +591,7 @@ class SyncWebRTCClient:
         self,
         text: str,
         voice: str | None = None,
-        cfg_scale: float | None = None,
+        speed: float | None = None,
         timeout: float = 60.0,
     ) -> None:
         """Speak text via TTS."""
@@ -599,7 +599,7 @@ class SyncWebRTCClient:
             raise RuntimeError("Not connected")
 
         future = asyncio.run_coroutine_threadsafe(
-            self._client.speak(text, voice, cfg_scale),
+            self._client.speak(text, voice, speed),
             self._loop,
         )
         future.result(timeout=timeout)

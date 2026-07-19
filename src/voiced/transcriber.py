@@ -14,6 +14,7 @@ from voiced.model_host import ModelHost
 
 logger = logging.getLogger(__name__)
 
+STT_MODEL = "nvidia/parakeet-tdt-0.6b-v3"
 STT_SAMPLE_RATE = 16000
 
 
@@ -52,7 +53,7 @@ class Transcriber:
                 unload_timeout_minutes * 60 if unload_timeout_minutes > 0 else None
             ),
             on_unload=_empty_cuda_cache,
-            name=f"parakeet({self.config.model})",
+            name=f"parakeet({STT_MODEL})",
         )
 
     @property
@@ -72,9 +73,9 @@ class Transcriber:
         device = resolve_device_config(self.config.device).device
         self._device = device
 
-        logger.info(f"Loading model '{self.config.model}' on {device}")
+        logger.info(f"Loading model '{STT_MODEL}' on {device}")
 
-        model = nemo_asr.models.ASRModel.from_pretrained(model_name=self.config.model)
+        model = nemo_asr.models.ASRModel.from_pretrained(model_name=STT_MODEL)
         model = model.to(device)
         model.eval()
         return model

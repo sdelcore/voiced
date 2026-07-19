@@ -41,7 +41,7 @@ pytest tests/test_cli.py::test_name  # Single test
 
 voiced is a voice daemon for Wayland/Hyprland that provides both:
 - **STT (Speech-to-Text)**: Using NVIDIA Parakeet-TDT (NeMo) for transcription
-- **TTS (Text-to-Speech)**: Using VibeVoice for synthesis
+- **TTS (Text-to-Speech)**: Using Kokoro-82M for synthesis
 
 ### Component Flow
 
@@ -50,7 +50,7 @@ CLI Command → Unix Socket IPC → Daemon
                                   ├── Server (server.py) - Unix socket handler
                                   ├── Recorder (recorder.py) - sounddevice audio capture
                                   ├── Transcriber (transcriber.py) - Parakeet-TDT STT
-                                  ├── Synthesizer (synthesizer.py) - VibeVoice TTS
+                                  ├── Synthesizer (synthesizer.py) - Kokoro TTS
                                   ├── Injector (injector.py) - wl-clipboard text injection
                                   └── TrayIcon (tray.py) - D-Bus StatusNotifierItem
 ```
@@ -59,7 +59,7 @@ CLI Command → Unix Socket IPC → Daemon
 
 **Record-then-Transcribe (STT)**: Toggle once to start recording (RED tray icon), toggle again to stop and begin batch transcription (YELLOW icon). When complete (BLUE icon), text is copied to clipboard.
 
-**Lazy Model Loading (TTS)**: TTS model loaded on first request, auto-unloaded after 1 hour of inactivity to free GPU memory.
+**Lazy Model Loading (TTS)**: TTS model loaded on first request, auto-unloaded after the shared idle timeout (default 15 min) to free GPU memory.
 
 **HTTP Client-Server Mode**: For remote STT/TTS:
 - `http_server.py` - HTTP server with `/transcribe`, `/synthesize`, `/health` endpoints

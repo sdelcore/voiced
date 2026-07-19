@@ -16,7 +16,7 @@ from voiced.capabilities import Voiced
 from voiced.config import Config, load_config
 from voiced.profile_store import LocalProfileStore, RemoteProfileStore  # noqa: F401
 from voiced.profiles import ProfileManager
-from voiced.transcriber import Transcriber
+from voiced.transcriber import STT_MODEL, Transcriber
 from voiced.webrtc_server import WebRTCConnectionManager
 
 logger = logging.getLogger(__name__)
@@ -154,7 +154,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             200,
             {
                 "status": "healthy",
-                "model": self.transcriber.config.model,
+                "model": STT_MODEL,
                 "device": device,
             },
         )
@@ -167,7 +167,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         status_data = {
             "status": "ok",
             "state": "idle",
-            "model": self.config.transcription.model,
+            "model": STT_MODEL,
             "device": device,
             "language": self.config.transcription.language,
             "request_count": TranscriptionHandler.request_count,
@@ -311,7 +311,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
                     "text": output.text,
                     "duration": round(output.duration, 2),
                     "processing_time": round(elapsed, 2),
-                    "model": self.config.transcription.model,
+                    "model": STT_MODEL,
                     "segments": segments_output,
                 },
             )
@@ -502,7 +502,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         if synthesizer is None:
             self._send_error_json(
                 503,
-                "TTS is not available (VibeVoice not installed or TTS disabled)",
+                "TTS is not available (Kokoro not installed or TTS disabled)",
                 "TTS_UNAVAILABLE",
             )
             return
@@ -534,13 +534,13 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             return
 
         voice = data.get("voice") or self.config.tts.default_voice
-        cfg_scale = data.get("cfg_scale") or self.config.tts.cfg_scale
+        speed = data.get("speed") or self.config.tts.speed
 
         logger.info(f"Synthesizing {len(text)} chars with voice '{voice}'")
 
         try:
             start_time = time.time()
-            audio = synthesizer.synthesize(text, voice=voice, cfg_scale=cfg_scale)
+            audio = synthesizer.synthesize(text, voice=voice, speed=speed)
             elapsed = time.time() - start_time
 
             # Convert to WAV bytes
@@ -577,7 +577,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
         if synthesizer is None:
             self._send_error_json(
                 503,
-                "TTS is not available (VibeVoice not installed or TTS disabled)",
+                "TTS is not available (Kokoro not installed or TTS disabled)",
                 "TTS_UNAVAILABLE",
             )
             return
@@ -609,7 +609,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             return
 
         voice = data.get("voice") or self.config.tts.default_voice
-        cfg_scale = data.get("cfg_scale") or self.config.tts.cfg_scale
+        speed = data.get("speed") or self.config.tts.speed
 
         logger.info(f"Streaming synthesis of {len(text)} chars with voice '{voice}'")
 
@@ -621,9 +621,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
             """Generate TTS chunks in background thread."""
             try:
                 first_chunk = True
-                for chunk in synthesizer.synthesize_streaming(
-                    text, voice=voice, cfg_scale=cfg_scale
-                ):
+                for chunk in synthesizer.synthesize_streaming(text, voice=voice, speed=speed):
                     if first_chunk:
                         logger.info("First TTS chunk generated")
                         first_chunk = False

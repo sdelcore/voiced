@@ -11,7 +11,7 @@ import sounddevice as sd
 
 logger = logging.getLogger(__name__)
 
-# VibeVoice outputs 24kHz audio
+# Kokoro outputs 24kHz audio
 SAMPLE_RATE = 24000
 
 
@@ -22,7 +22,7 @@ class AudioPlayer:
         """Initialize audio player.
 
         Args:
-            sample_rate: Audio sample rate (default 24000 for VibeVoice)
+            sample_rate: Audio sample rate (default 24000 for Kokoro)
         """
         self.sample_rate = sample_rate
 
@@ -60,7 +60,7 @@ class StreamingAudioPlayer:
         """Initialize streaming audio player.
 
         Args:
-            sample_rate: Audio sample rate (default 24000 for VibeVoice)
+            sample_rate: Audio sample rate (default 24000 for Kokoro)
             buffer_size: Audio buffer size in samples
             silence_padding_ms: Silence to append at end to prevent cutoff
         """
