@@ -51,7 +51,7 @@ class TTSConfig:
     """Configuration for TTS session."""
 
     voice: str | None = None
-    cfg_scale: float | None = None
+    speed: float | None = None
 
 
 class AudioBufferTrack(MediaStreamTrack):
@@ -612,7 +612,7 @@ class WebRTCConnectionManager:
 
         session.tts_config = TTSConfig(
             voice=config.get("voice"),
-            cfg_scale=config.get("cfg_scale"),
+            speed=config.get("speed"),
         )
         session._tts_active = True
 
@@ -639,7 +639,7 @@ class WebRTCConnectionManager:
                     for chunk in self.synthesizer.synthesize_streaming(
                         text,
                         voice=session.tts_config.voice,
-                        cfg_scale=session.tts_config.cfg_scale,
+                        speed=session.tts_config.speed,
                     ):
                         chunk_queue.put(chunk)
                     chunk_queue.put(None)  # Signal end

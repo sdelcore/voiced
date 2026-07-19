@@ -1,12 +1,12 @@
 [project]
 name = "voiced"
-version = "0.3.0"
+version = "0.4.0"
 description = "Voice daemon - Speech-to-Text and Text-to-Speech for Linux/Wayland"
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "sdelcore" }]
-keywords = ["speech-to-text", "text-to-speech", "parakeet", "nemo", "tts", "stt", "transcription", "speaker-identification", "vibevoice", "daemon", "wayland"]
+keywords = ["speech-to-text", "text-to-speech", "parakeet", "nemo", "tts", "stt", "transcription", "speaker-identification", "kokoro", "daemon", "wayland"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Environment :: Console",
@@ -31,8 +31,8 @@ dependencies = [
     "torch==2.9.1",
     "torchaudio==2.9.1",
     "speechbrain>=1.0.0,<1.1.0",
-    # TTS dependencies (VibeVoice installed separately)
-    "tqdm>=4.65.0",
+    # TTS (Kokoro-82M; needs espeak-ng at runtime for g2p fallback)
+    "kokoro>=0.9.4",
     # WebRTC for real-time audio streaming
     "aiortc>=1.6.0",
     # Shared dependencies

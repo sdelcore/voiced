@@ -1,8 +1,6 @@
-"""TTS synthesizer using VibeVoice."""
+"""TTS synthesizer using Kokoro-82M."""
 
-import copy
 import logging
-import threading
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
@@ -17,42 +15,37 @@ from voiced.voice_manager import VoiceManager
 
 logger = logging.getLogger(__name__)
 
-# Default TTS settings
-DEFAULT_MODEL_PATH = "microsoft/VibeVoice-Realtime-0.5B"
-DEFAULT_VOICE = "emma"
-DEFAULT_CFG_SCALE = 1.5
-DEFAULT_UNLOAD_TIMEOUT = 3600  # 1 hour in seconds
+TTS_MODEL = "hexgrad/Kokoro-82M"
+DEFAULT_VOICE = "af_heart"
+DEFAULT_UNLOAD_TIMEOUT = 900
 SAMPLE_RATE = 24000
+
+# Split on sentence boundaries so streaming yields audio per sentence.
+SPLIT_PATTERN = r"(?<=[.!?…])\s+|\n+"
 
 
 @dataclass
 class TTSConfig:
     """Configuration for TTS synthesizer."""
 
-    model_path: str = DEFAULT_MODEL_PATH
     device: str = "auto"
     default_voice: str = DEFAULT_VOICE
-    cfg_scale: float = DEFAULT_CFG_SCALE
+    speed: float = 1.0
     unload_timeout_seconds: int = DEFAULT_UNLOAD_TIMEOUT
 
 
-def check_vibevoice_installed() -> bool:
-    """Check if VibeVoice is installed."""
+def check_kokoro_installed() -> bool:
+    """Check if Kokoro is installed."""
     try:
         import importlib.util
 
-        return (
-            importlib.util.find_spec("vibevoice.modular.modeling_vibevoice_streaming_inference")
-            is not None
-            and importlib.util.find_spec("vibevoice.processor.vibevoice_streaming_processor")
-            is not None
-        )
+        return importlib.util.find_spec("kokoro") is not None
     except ImportError:
         return False
 
 
 class Synthesizer:
-    """VibeVoice TTS engine with lazy loading and auto-unload."""
+    """Kokoro TTS engine with lazy loading and auto-unload."""
 
     def __init__(self, config: TTSConfig | None = None):
         """Initialize synthesizer.
@@ -61,12 +54,10 @@ class Synthesizer:
             config: TTS configuration. If None, uses defaults.
         """
         self.config = config or TTSConfig()
-        self.processor: Any = None
         self.voice_manager = VoiceManager()
         self._last_used: float | None = None
         self._device: str | None = None
-        self._dtype: torch.dtype | None = None
-        self._attn_impl: str | None = None
+        self._pipelines: dict[str, Any] = {}
         self._host: ModelHost[Any] = ModelHost(
             loader=self._load_model,
             idle_timeout=(
@@ -75,211 +66,120 @@ class Synthesizer:
                 else None
             ),
             on_unload=self._on_unload,
-            name="vibevoice",
+            name="kokoro",
         )
 
     def _load_model(self) -> Any:
-        """Load VibeVoice model from HuggingFace."""
-        if not check_vibevoice_installed():
+        """Load the Kokoro model from HuggingFace."""
+        if not check_kokoro_installed():
             raise RuntimeError(
-                "VibeVoice is not installed. Please install it with:\n"
-                "  pip install git+https://github.com/microsoft/VibeVoice.git"
+                "Kokoro is not installed. Please install it with:\n  pip install kokoro"
             )
 
-        from vibevoice.modular.modeling_vibevoice_streaming_inference import (
-            VibeVoiceStreamingForConditionalGenerationInference,
-        )
-        from vibevoice.processor.vibevoice_streaming_processor import (
-            VibeVoiceStreamingProcessor,
-        )
+        from kokoro import KModel
 
-        device_cfg = resolve_device_config(self.config.device)
-        self._device = device_cfg.device
-        self._dtype = device_cfg.dtype
-        self._attn_impl = device_cfg.attn_impl
+        device = resolve_device_config(self.config.device).device
+        if device not in ("cuda", "cpu"):
+            device = "cpu"
+        self._device = device
 
-        logger.info(f"Loading TTS processor from {self.config.model_path}...")
-        self.processor = VibeVoiceStreamingProcessor.from_pretrained(self.config.model_path)
-
-        logger.info(
-            f"Loading TTS model from {self.config.model_path} "
-            f"(device={self._device}, dtype={self._dtype})..."
-        )
-
-        try:
-            if self._device == "mps":
-                model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
-                    self.config.model_path,
-                    torch_dtype=self._dtype,
-                    attn_implementation=self._attn_impl,
-                    device_map=None,
-                )
-                model.to("mps")
-            else:
-                model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
-                    self.config.model_path,
-                    torch_dtype=self._dtype,
-                    device_map=self._device,
-                    attn_implementation=self._attn_impl,
-                )
-        except Exception as e:
-            if self._attn_impl == "flash_attention_2":
-                logger.warning(f"Flash attention failed: {e}")
-                logger.info("Falling back to SDPA attention...")
-                self._attn_impl = "sdpa"
-                model = VibeVoiceStreamingForConditionalGenerationInference.from_pretrained(
-                    self.config.model_path,
-                    torch_dtype=self._dtype,
-                    device_map=self._device if self._device != "mps" else None,
-                    attn_implementation="sdpa",
-                )
-                if self._device == "mps":
-                    model.to("mps")
-            else:
-                raise
-
-        model.eval()
-        model.set_ddpm_inference_steps(num_steps=5)
+        logger.info(f"Loading TTS model '{TTS_MODEL}' on {device}...")
+        model = KModel(repo_id=TTS_MODEL).to(device).eval()
         logger.info("TTS model loaded successfully")
         return model
 
     def _on_unload(self, _model: Any) -> None:
         """Cleanup hook fired by ModelHost when the model is dropped."""
-        self.processor = None
+        self._pipelines.clear()
         self.voice_manager.clear_memory_cache()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+
+    def _pipeline_for(self, model: Any, voice: str) -> Any:
+        """Get or create the phonemization pipeline for the voice's accent."""
+        from kokoro import KPipeline
+
+        lang_code = "b" if voice.startswith("b") else "a"
+        pipeline = self._pipelines.get(lang_code)
+        if pipeline is None:
+            pipeline = KPipeline(lang_code=lang_code, model=model, repo_id=TTS_MODEL)
+            self._pipelines[lang_code] = pipeline
+        return pipeline
+
+    def _generate(
+        self,
+        model: Any,
+        text: str,
+        voice: str | None,
+        speed: float | None,
+    ) -> Iterator[np.ndarray]:
+        voice = (voice or self.config.default_voice).lower()
+        speed = speed if speed is not None else self.config.speed
+
+        pipeline = self._pipeline_for(model, voice)
+        voice_tensor = self.voice_manager.load_voice_tensor(voice)
+
+        for result in pipeline(text, voice=voice_tensor, speed=speed, split_pattern=SPLIT_PATTERN):
+            _graphemes, _phonemes, audio = result
+            if audio is None:
+                continue
+            if torch.is_tensor(audio):
+                audio = audio.float().cpu().numpy()
+            yield np.squeeze(audio).astype(np.float32)
 
     def synthesize(
         self,
         text: str,
         voice: str | None = None,
-        cfg_scale: float | None = None,
+        speed: float | None = None,
     ) -> np.ndarray:
         """Generate audio from text (batch mode).
 
         Args:
             text: Text to synthesize
-            voice: Voice preset name (default from config)
-            cfg_scale: Classifier-free guidance scale (default from config)
+            voice: Voice name (default from config)
+            speed: Speech rate multiplier (default from config)
 
         Returns:
             Audio samples as numpy array (float32, 24kHz)
         """
-        voice = voice or self.config.default_voice
-        cfg_scale = cfg_scale if cfg_scale is not None else self.config.cfg_scale
-
         with self._host.use() as model:
             self._last_used = time.time()
-            voice_cache = self.voice_manager.load_voice_cache(voice, self._device)
-
-            inputs = self.processor.process_input_with_cached_prompt(
-                text=text,
-                cached_prompt=voice_cache,
-                padding=True,
-                return_tensors="pt",
-                return_attention_mask=True,
-            )
-            for k, v in inputs.items():
-                if torch.is_tensor(v):
-                    inputs[k] = v.to(self._device)
-
             logger.info(f"Synthesizing: {text[:50]}...")
             start_time = time.time()
-            outputs = model.generate(
-                **inputs,
-                cfg_scale=cfg_scale,
-                tokenizer=self.processor.tokenizer,
-                generation_config={"do_sample": False},
-                verbose=False,
-                show_progress_bar=False,
-                all_prefilled_outputs=copy.deepcopy(voice_cache),
-            )
+            chunks = list(self._generate(model, text, voice, speed))
             gen_time = time.time() - start_time
 
-        if outputs.speech_outputs and outputs.speech_outputs[0] is not None:
-            audio = outputs.speech_outputs[0]
-            if torch.is_tensor(audio):
-                audio = audio.float().cpu().numpy()
-            audio = np.squeeze(audio).astype(np.float32)
-
-            duration = len(audio) / SAMPLE_RATE
-            rtf = gen_time / duration if duration > 0 else float("inf")
-            logger.info(f"Synthesized {duration:.2f}s audio in {gen_time:.2f}s (RTF: {rtf:.2f}x)")
-            return audio
-        else:
+        if not chunks:
             raise RuntimeError("No audio output generated")
+
+        audio = np.concatenate(chunks)
+        duration = len(audio) / SAMPLE_RATE
+        rtf = gen_time / duration if duration > 0 else float("inf")
+        logger.info(f"Synthesized {duration:.2f}s audio in {gen_time:.2f}s (RTF: {rtf:.2f}x)")
+        return audio
 
     def synthesize_streaming(
         self,
         text: str,
         voice: str | None = None,
-        cfg_scale: float | None = None,
+        speed: float | None = None,
     ) -> Iterator[np.ndarray]:
-        """Generate audio chunks for streaming.
+        """Generate audio chunks for streaming, one per sentence.
 
         Args:
             text: Text to synthesize
-            voice: Voice preset name (default from config)
-            cfg_scale: Classifier-free guidance scale (default from config)
+            voice: Voice name (default from config)
+            speed: Speech rate multiplier (default from config)
 
         Yields:
             Audio chunks as numpy arrays (float32, 24kHz)
         """
-        from vibevoice.modular.streamer import AudioStreamer
-
-        voice = voice or self.config.default_voice
-        cfg_scale = cfg_scale if cfg_scale is not None else self.config.cfg_scale
-
         # Hold a lease for the entire streaming call so the host cannot unload
         # the model while we're producing chunks.
         with self._host.use() as model:
             self._last_used = time.time()
-            voice_cache = self.voice_manager.load_voice_cache(voice, self._device)
-
-            inputs = self.processor.process_input_with_cached_prompt(
-                text=text,
-                cached_prompt=voice_cache,
-                padding=True,
-                return_tensors="pt",
-                return_attention_mask=True,
-            )
-            for k, v in inputs.items():
-                if torch.is_tensor(v):
-                    inputs[k] = v.to(self._device)
-
-            audio_streamer = AudioStreamer(batch_size=1, stop_signal=None)
-            generation_error: list[Exception] = []
-
-            def generate_thread():
-                try:
-                    model.generate(
-                        **inputs,
-                        cfg_scale=cfg_scale,
-                        tokenizer=self.processor.tokenizer,
-                        generation_config={"do_sample": False},
-                        verbose=False,
-                        show_progress_bar=False,
-                        audio_streamer=audio_streamer,
-                        all_prefilled_outputs=copy.deepcopy(voice_cache),
-                    )
-                except Exception as e:
-                    generation_error.append(e)
-                    audio_streamer.end()
-
-            thread = threading.Thread(target=generate_thread, daemon=True)
-            thread.start()
-
-            try:
-                for chunk in audio_streamer.get_stream(0):
-                    if torch.is_tensor(chunk):
-                        chunk = chunk.float().cpu().numpy()
-                    chunk = np.squeeze(chunk).astype(np.float32)
-                    yield chunk
-            finally:
-                thread.join(timeout=5)
-                if generation_error:
-                    raise generation_error[0]
+            yield from self._generate(model, text, voice, speed)
 
     @property
     def is_loaded(self) -> bool:
@@ -300,10 +200,10 @@ class Synthesizer:
         """Get synthesizer status."""
         return {
             "model_loaded": self.is_loaded,
-            "model_path": self.config.model_path,
+            "model": TTS_MODEL,
             "device": self._device,
             "default_voice": self.config.default_voice,
-            "cfg_scale": self.config.cfg_scale,
+            "speed": self.config.speed,
             "unload_timeout_seconds": self.config.unload_timeout_seconds,
             "last_used": self._last_used,
             "voices_downloaded": self.voice_manager.list_downloaded(),

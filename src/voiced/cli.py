@@ -39,7 +39,7 @@ def main(ctx: click.Context, verbose: bool) -> None:
     """voiced - Voice Daemon for STT and TTS.
 
     A CLI application for speech-to-text (STT) and text-to-speech (TTS).
-    Uses NVIDIA Parakeet-TDT (NeMo) for STT and VibeVoice for TTS.
+    Uses NVIDIA Parakeet-TDT (NeMo) for STT and Kokoro for TTS.
     Designed for Hyprland/Wayland with hotkey support.
 
     \b
@@ -63,7 +63,6 @@ def main(ctx: click.Context, verbose: bool) -> None:
 @click.option("--http", is_flag=True, help="Enable embedded HTTP server for remote transcription")
 @click.option("--http-host", default=None, help="HTTP server host (default: from config)")
 @click.option("--http-port", default=None, type=int, help="HTTP server port (default: from config)")
-@click.option("--no-vad", is_flag=True, help="Disable voice activity detection")
 @click.pass_context
 def start(
     ctx: click.Context,
@@ -71,7 +70,6 @@ def start(
     http: bool,
     http_host: str | None,
     http_port: int | None,
-    no_vad: bool,
 ) -> None:
     """Start the voiced daemon.
 
@@ -96,14 +94,12 @@ def start(
 
     config = load_config()
 
-    # Override VAD if --no-vad is set
-    if no_vad:
-        config.vad.enabled = False
-
     # Determine effective HTTP settings
     http_enabled = http or config.daemon.http_enabled
 
-    click.echo(f"Starting voiced daemon (model: {config.transcription.model})")
+    from voiced.transcriber import STT_MODEL
+
+    click.echo(f"Starting voiced daemon (model: {STT_MODEL})")
     if http_enabled:
         effective_host = http_host or config.daemon.http_host or config.server.host
         effective_port = http_port or config.daemon.http_port or config.server.port
@@ -132,14 +128,12 @@ def start(
 @click.option("--host", default=None, help="Host to bind to (default: 127.0.0.1)")
 @click.option("--port", default=None, type=int, help="Port to bind to (default: 8765)")
 @click.option("--daemon", "-d", is_flag=True, help="Run in background")
-@click.option("--no-vad", is_flag=True, help="Disable voice activity detection")
 @click.pass_context
 def server(
     ctx: click.Context,
     host: str | None,
     port: int | None,
     daemon: bool,
-    no_vad: bool,
 ) -> None:
     """Start the transcription HTTP server.
 
@@ -164,15 +158,13 @@ def server(
 
     config = load_config()
 
-    # Override VAD if --no-vad is set
-    if no_vad:
-        config.vad.enabled = False
-
     effective_host = host or config.server.host
     effective_port = port or config.server.port
 
+    from voiced.transcriber import STT_MODEL
+
     click.echo(f"Starting transcription server on {effective_host}:{effective_port}")
-    click.echo(f"Model: {config.transcription.model}")
+    click.echo(f"Model: {STT_MODEL}")
     click.echo("WebRTC: enabled")
 
     if daemon:
@@ -213,7 +205,7 @@ def client_cmd(
     """Start the remote client daemon.
 
     Records audio locally and sends to a remote server for transcription.
-    The server URL can be set via CLI, environment variable (STTD_SERVER_URL),
+    The server URL can be set via CLI, environment variable (VOICED_SERVER_URL),
     or config file.
 
     Examples:
@@ -222,7 +214,7 @@ def client_cmd(
 
         voiced client -d                  # Run in background
 
-        STTD_SERVER_URL=http://server:8765 voiced client
+        VOICED_SERVER_URL=http://server:8765 voiced client
     """
     from voiced.config import get_server_url
     from voiced.daemon import daemonize
@@ -427,7 +419,6 @@ def status() -> None:
 @main.command()
 @click.argument("audio_file", type=click.Path(exists=True, path_type=Path))
 @click.option("-o", "--output", type=click.Path(path_type=Path), help="Output file")
-@click.option("--model", default=None, help="Model to use (overrides config)")
 @click.option("--device", default=None, help="Device to use: auto, cuda, cpu")
 @click.option("--annotate", is_flag=True, help="Enable timestamps and speaker diarization")
 @click.option("--num-speakers", type=int, default=None, help="Number of speakers (auto if unset)")
@@ -435,17 +426,14 @@ def status() -> None:
 @click.option(
     "--timeout", type=float, default=300.0, help="Request timeout in seconds (default: 300)"
 )
-@click.option("--no-vad", is_flag=True, help="Disable voice activity detection")
 def transcribe(
     audio_file: Path,
     output: Path | None,
-    model: str | None,
     device: str | None,
     annotate: bool,
     num_speakers: int | None,
     server_url: str | None,
     timeout: float,
-    no_vad: bool,
 ) -> None:
     """Transcribe an audio file.
 
@@ -455,7 +443,7 @@ def transcribe(
 
         voiced transcribe audio.mp3 -o transcript.txt
 
-        voiced transcribe audio.wav --model large-v3 --device cuda
+        voiced transcribe audio.wav --device cuda
 
         voiced transcribe meeting.wav --annotate
 
@@ -467,13 +455,8 @@ def transcribe(
     """
     config = load_config()
 
-    # Override config with CLI options
-    if model:
-        config.transcription.model = model
     if device:
         config.transcription.device = device
-    if no_vad:
-        config.vad.enabled = False
 
     click.echo(f"Transcribing: {audio_file}", err=True)
 
@@ -482,7 +465,9 @@ def transcribe(
             click.echo(f"Using remote server: {server_url}", err=True)
             _transcribe_remote(audio_file, output, server_url, timeout, annotate, num_speakers)
         else:
-            click.echo(f"Model: {config.transcription.model}", err=True)
+            from voiced.transcriber import STT_MODEL
+
+            click.echo(f"Model: {STT_MODEL}", err=True)
             _transcribe_local(audio_file, output, config, device, annotate, num_speakers)
 
     except FileNotFoundError as e:
@@ -588,13 +573,11 @@ def _transcribe_local(
 
 @main.command()
 @click.option("-o", "--output", type=click.Path(path_type=Path), help="Output file")
-@click.option("--model", default=None, help="Model to use (overrides config)")
 @click.option("--device", default=None, help="Device to use: auto, cuda, cpu")
 @click.option("--annotate", is_flag=True, help="Enable speaker diarization")
 @click.option("--num-speakers", type=int, default=None, help="Number of speakers (auto if unset)")
 def record(
     output: Path | None,
-    model: str | None,
     device: str | None,
     annotate: bool,
     num_speakers: int | None,
@@ -614,7 +597,7 @@ def record(
 
         voiced record --annotate --num-speakers 2
 
-        voiced record --model large-v3 --device cuda
+        voiced record --device cuda
     """
     import signal
     import time
@@ -623,9 +606,6 @@ def record(
 
     config = load_config()
 
-    # Override config with CLI options
-    if model:
-        config.transcription.model = model
     if device:
         config.transcription.device = device
 
@@ -663,7 +643,9 @@ def record(
         click.echo("Error: Recording too short (minimum 0.5 seconds)", err=True)
         sys.exit(1)
 
-    click.echo(f"Transcribing with model: {config.transcription.model}", err=True)
+    from voiced.transcriber import STT_MODEL
+
+    click.echo(f"Transcribing with model: {STT_MODEL}", err=True)
 
     try:
         from voiced.capabilities import Voiced
@@ -710,9 +692,8 @@ def record(
 @main.command()
 @click.option("--show", is_flag=True, help="Show current configuration")
 @click.option("--init", is_flag=True, help="Create default config file")
-@click.option("--model", help="Set transcription model")
 @click.option("--device", help="Set device (auto, cuda, cpu)")
-def config(show: bool, init: bool, model: str | None, device: str | None) -> None:
+def config(show: bool, init: bool, device: str | None) -> None:
     """Show or modify configuration.
 
     Configuration file location: ~/.config/voiced/config.toml
@@ -727,7 +708,7 @@ def config(show: bool, init: bool, model: str | None, device: str | None) -> Non
             click.echo(f"Created config: {config_path}")
         return
 
-    if model or device:
+    if device:
         # Modify config
         if not config_path.exists():
             save_default_config()
@@ -735,15 +716,6 @@ def config(show: bool, init: bool, model: str | None, device: str | None) -> Non
         # Read, modify, write
         with open(config_path) as f:
             content = f.read()
-
-        if model:
-            content = re.sub(
-                r'^model\s*=\s*"[^"]*"',
-                f'model = "{model}"',
-                content,
-                flags=re.MULTILINE,
-            )
-            click.echo(f"Set model: {model}")
 
         if device:
             content = re.sub(
@@ -769,7 +741,6 @@ def config(show: bool, init: bool, model: str | None, device: str | None) -> Non
         click.echo(f"No config file found at: {config_path}")
         click.echo("\nCurrent defaults:")
         cfg = load_config()
-        click.echo(f"  model: {cfg.transcription.model}")
         click.echo(f"  device: {cfg.transcription.device}")
         click.echo(f"  language: {cfg.transcription.language}")
         click.echo(f"  beep_enabled: {cfg.audio.beep_enabled}")
@@ -1062,7 +1033,7 @@ def devices() -> None:
 @click.option("-v", "--voice", default=None, help="Voice preset (default: from config)")
 @click.option("--server", "server_url", default=None, help="Server URL for remote TTS")
 @click.option("--timeout", type=float, default=60.0, help="Request timeout in seconds")
-@click.option("--cfg-scale", type=float, default=None, help="Classifier-free guidance scale")
+@click.option("--speed", type=float, default=None, help="Speech rate multiplier")
 @click.pass_context
 def speak(
     ctx: click.Context,
@@ -1074,7 +1045,7 @@ def speak(
     voice: str | None,
     server_url: str | None,
     timeout: float,
-    cfg_scale: float | None,
+    speed: float | None,
 ) -> None:
     """Synthesize speech from text.
 
@@ -1090,7 +1061,7 @@ def speak(
 
         voiced speak "Save this" -o output.wav
 
-        voiced speak "Hello" --voice mike
+        voiced speak "Hello" --voice am_michael
 
         voiced speak "Hello" --server http://192.168.1.100:8765
     """
@@ -1139,9 +1110,9 @@ def speak(
 
     # Use server if URL provided
     if server_url:
-        _speak_remote(text, server_url, voice, output_file, stream, timeout, cfg_scale)
+        _speak_remote(text, server_url, voice, output_file, stream, timeout, speed)
     else:
-        _speak_local(text, config, voice, output_file, stream, cfg_scale)
+        _speak_local(text, config, voice, output_file, stream, speed)
 
 
 def _speak_local(
@@ -1150,25 +1121,23 @@ def _speak_local(
     voice: str | None,
     output_file: Path | None,
     stream: bool,
-    cfg_scale: float | None,
+    speed: float | None,
 ) -> None:
-    """Synthesize speech locally using VibeVoice."""
-    from voiced.synthesizer import Synthesizer, TTSConfig, check_vibevoice_installed
+    """Synthesize speech locally using Kokoro."""
+    from voiced.synthesizer import Synthesizer, TTSConfig, check_kokoro_installed
 
-    if not check_vibevoice_installed():
+    if not check_kokoro_installed():
         click.echo(
-            "Error: VibeVoice is not installed. Install it with:\n"
-            "  pip install git+https://github.com/microsoft/VibeVoice.git",
+            "Error: Kokoro is not installed. Install it with:\n  pip install kokoro",
             err=True,
         )
         sys.exit(1)
 
     # Create TTSConfig from app config
     tts_config = TTSConfig(
-        model_path=config.tts.model,
         device=config.tts.device,
         default_voice=voice or config.tts.default_voice,
-        cfg_scale=cfg_scale if cfg_scale is not None else config.tts.cfg_scale,
+        speed=speed if speed is not None else config.tts.speed,
         unload_timeout_seconds=config.unload_timeout_minutes * 60,
     )
 
@@ -1185,9 +1154,7 @@ def _speak_local(
             player.start()
 
             try:
-                for chunk in synthesizer.synthesize_streaming(
-                    text, voice=voice, cfg_scale=cfg_scale
-                ):
+                for chunk in synthesizer.synthesize_streaming(text, voice=voice, speed=speed):
                     player.write(chunk)
                 player.finish()
                 player.wait()
@@ -1197,7 +1164,7 @@ def _speak_local(
         else:
             # Batch synthesis
             click.echo(f"Synthesizing: {text[:50]}{'...' if len(text) > 50 else ''}", err=True)
-            audio = synthesizer.synthesize(text, voice=voice, cfg_scale=cfg_scale)
+            audio = synthesizer.synthesize(text, voice=voice, speed=speed)
 
             if output_file:
                 # Save to file
@@ -1225,7 +1192,7 @@ def _speak_remote(
     output_file: Path | None,
     stream: bool,
     timeout: float,
-    cfg_scale: float | None,
+    speed: float | None,
 ) -> None:
     """Synthesize speech using remote server via WebRTC."""
     from voiced.webrtc_client import SyncWebRTCClient, WebRTCClientConfig
@@ -1244,7 +1211,7 @@ def _speak_remote(
         client.connect()
 
         # Speak via WebRTC - audio is streamed to local playback
-        client.speak(text, voice=voice, cfg_scale=cfg_scale, timeout=timeout)
+        client.speak(text, voice=voice, speed=speed, timeout=timeout)
         click.echo("Done", err=True)
 
     except Exception as e:
@@ -1268,9 +1235,9 @@ def voices(ctx: click.Context) -> None:
 
         voiced voices list               # List all voices
 
-        voiced voices download emma      # Download voice preset
+        voiced voices download af_heart   # Download voice preset
 
-        voiced voices remove emma        # Remove cached voice
+        voiced voices remove af_heart     # Remove cached voice
     """
     if ctx.invoked_subcommand is None:
         ctx.invoke(voices_list)
@@ -1302,9 +1269,9 @@ def voices_download(name: str, force: bool) -> None:
 
     Examples:
 
-        voiced voices download emma
+        voiced voices download af_heart
 
-        voiced voices download mike --force
+        voiced voices download am_michael --force
     """
     from voiced.voice_manager import VoiceManager
 
@@ -1330,9 +1297,9 @@ def voices_remove(name: str, force: bool) -> None:
 
     Examples:
 
-        voiced voices remove emma
+        voiced voices remove af_heart
 
-        voiced voices remove mike --force
+        voiced voices remove am_michael --force
     """
     from voiced.voice_manager import VoiceManager
 
@@ -1367,7 +1334,7 @@ def voices_info(name: str) -> None:
 
     Examples:
 
-        voiced voices info emma
+        voiced voices info af_heart
     """
     from voiced.voice_manager import VoiceManager
 

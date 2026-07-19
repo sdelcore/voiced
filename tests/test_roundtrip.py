@@ -1,12 +1,12 @@
 """End-to-end TTS → STT round-trip test.
 
-Synthesizes a known sentence with VibeVoice, then transcribes it with
+Synthesizes a known sentence with Kokoro, then transcribes it with
 Parakeet-TDT, and asserts the result is recognizable as the original.
 
 Skipped by default — opt in with ``pytest -m integration``.  Requires:
-  * VibeVoice installed (TTS).
+  * Kokoro installed (TTS) and espeak-ng available.
   * NeMo + Parakeet weights downloadable (STT).
-  * A working voice preset (downloaded automatically by VoiceManager).
+  * A working voice pack (downloaded automatically by VoiceManager).
   * Enough VRAM for both models, or patience on CPU.
 """
 
@@ -19,7 +19,7 @@ import pytest
 
 from voiced.config import TranscriptionConfig
 from voiced.synthesizer import SAMPLE_RATE as TTS_SAMPLE_RATE
-from voiced.synthesizer import Synthesizer, TTSConfig, check_vibevoice_installed
+from voiced.synthesizer import Synthesizer, TTSConfig, check_kokoro_installed
 from voiced.transcriber import STT_SAMPLE_RATE, Transcriber
 
 pytestmark = pytest.mark.integration
@@ -54,8 +54,8 @@ def _resample(audio: np.ndarray, src: int, dst: int) -> np.ndarray:
 
 @pytest.fixture(scope="module")
 def synthesizer() -> Synthesizer:
-    if not check_vibevoice_installed():
-        pytest.skip("VibeVoice not installed")
+    if not check_kokoro_installed():
+        pytest.skip("Kokoro not installed")
     synth = Synthesizer(TTSConfig(unload_timeout_seconds=0))
     yield synth
     synth.shutdown()

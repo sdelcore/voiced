@@ -31,30 +31,19 @@ def _fake_result(
 class TestTranscriberConfig:
     def test_default_config(self):
         config = TranscriptionConfig()
-        assert config.model == "nvidia/parakeet-tdt-0.6b-v3"
         assert config.device == "auto"
         assert config.language == "en"
+        assert config.replacements == {}
 
     def test_custom_config(self):
-        config = TranscriptionConfig(
-            model="nvidia/parakeet-tdt-0.6b-v2",
-            device="cpu",
-            language="en",
-        )
-        assert config.model == "nvidia/parakeet-tdt-0.6b-v2"
+        config = TranscriptionConfig(device="cpu", language="en")
         assert config.device == "cpu"
 
 
 class TestTranscriberInit:
     def test_init(self):
         transcriber = Transcriber()
-        assert transcriber.config.model == "nvidia/parakeet-tdt-0.6b-v3"
         assert not transcriber._host.is_loaded  # Lazy load
-
-    def test_init_with_config(self):
-        config = TranscriptionConfig(model="nvidia/parakeet-tdt-0.6b-v2")
-        transcriber = Transcriber(config)
-        assert transcriber.config.model == "nvidia/parakeet-tdt-0.6b-v2"
 
     def test_idle_timeout_from_minutes(self):
         transcriber = Transcriber(unload_timeout_minutes=15)
@@ -155,20 +144,33 @@ class TestTranscribeMocked:
         audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
         assert transcriber.transcribe_partial(audio) == "partial"
 
-    def test_transcribe_stream_yields_segment_text(self):
-        transcriber = Transcriber()
+    def test_replacements_applied_to_text(self):
+        config = TranscriptionConfig(replacements={"cloud code": "Claude Code"})
+        transcriber = Transcriber(config)
+        self._stub_model(transcriber, _fake_result(text="open Cloud Code now"))
+        audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
+        assert transcriber.transcribe_audio(audio) == "open Claude Code now"
+
+    def test_replacements_respect_word_boundaries(self):
+        config = TranscriptionConfig(replacements={"cat": "kat"})
+        transcriber = Transcriber(config)
+        self._stub_model(transcriber, _fake_result(text="the cat concatenates"))
+        audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
+        assert transcriber.transcribe_audio(audio) == "the kat concatenates"
+
+    def test_replacements_applied_to_segments(self):
+        config = TranscriptionConfig(replacements={"hyperland": "Hyprland"})
+        transcriber = Transcriber(config)
         self._stub_model(
             transcriber,
             _fake_result(
-                text="a b",
-                segments=[
-                    {"start": 0.0, "end": 0.1, "segment": "a"},
-                    {"start": 0.1, "end": 0.2, "segment": "b"},
-                ],
+                text="hyperland rocks",
+                segments=[{"start": 0.0, "end": 1.0, "segment": "hyperland rocks"}],
             ),
         )
         audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
-        assert list(transcriber.transcribe_stream(audio)) == ["a", "b"]
+        segments = transcriber.transcribe_audio_with_segments(audio)
+        assert segments == [(0.0, 1.0, "Hyprland rocks")]
 
     def test_empty_results_raises(self):
         transcriber = Transcriber()

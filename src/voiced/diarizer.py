@@ -19,6 +19,8 @@ from voiced.profiles import ProfileManager, VoiceProfile
 
 logger = logging.getLogger(__name__)
 
+SPEAKER_MODEL = "speechbrain/spkrec-ecapa-voxceleb"
+
 ENROLLMENT_PROMPT = (
     "The rainbow is a division of white light into many beautiful colors. "
     "These take the shape of a long round arch with its path high above "
@@ -46,7 +48,7 @@ class SpeakerEmbedder:
 
     def __init__(
         self,
-        model_source: str = "speechbrain/spkrec-ecapa-voxceleb",
+        model_source: str = SPEAKER_MODEL,
         device: str = "auto",
     ):
         self._classifier = None
@@ -148,10 +150,7 @@ class SpeakerIdentifier:
     def embedder(self) -> SpeakerEmbedder:
         """Get or create speaker embedder."""
         if self._embedder is None:
-            self._embedder = SpeakerEmbedder(
-                model_source=self.config.model,
-                device=self.device,
-            )
+            self._embedder = SpeakerEmbedder(device=self.device)
         return self._embedder
 
     def identify_segments(
@@ -375,10 +374,7 @@ class SpeakerDiarizer:
     def embedder(self) -> SpeakerEmbedder:
         """Get embedder for embedding extraction."""
         if self._embedder is None:
-            self._embedder = SpeakerEmbedder(
-                model_source=self.config.model,
-                device=self.device,
-            )
+            self._embedder = SpeakerEmbedder(device=self.device)
         return self._embedder
 
     def _extract_windowed_embeddings(

@@ -1,7 +1,7 @@
 """Transcription engine using NVIDIA Parakeet-TDT (NeMo)."""
 
 import logging
-from collections.abc import Generator
+import re
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +14,7 @@ from voiced.model_host import ModelHost
 
 logger = logging.getLogger(__name__)
 
+STT_MODEL = "nvidia/parakeet-tdt-0.6b-v3"
 STT_SAMPLE_RATE = 16000
 
 
@@ -41,6 +42,10 @@ class Transcriber:
                 idle (0 = never). Shared with TTS via the app config.
         """
         self.config = config or TranscriptionConfig()
+        self._replacements = [
+            (re.compile(rf"\b{re.escape(wrong)}\b", re.IGNORECASE), right)
+            for wrong, right in self.config.replacements.items()
+        ]
         self._device: str | None = None
         self._host: ModelHost[Any] = ModelHost(
             loader=self._load_model,
@@ -48,7 +53,7 @@ class Transcriber:
                 unload_timeout_minutes * 60 if unload_timeout_minutes > 0 else None
             ),
             on_unload=_empty_cuda_cache,
-            name=f"parakeet({self.config.model})",
+            name=f"parakeet({STT_MODEL})",
         )
 
     @property
@@ -68,9 +73,9 @@ class Transcriber:
         device = resolve_device_config(self.config.device).device
         self._device = device
 
-        logger.info(f"Loading model '{self.config.model}' on {device}")
+        logger.info(f"Loading model '{STT_MODEL}' on {device}")
 
-        model = nemo_asr.models.ASRModel.from_pretrained(model_name=self.config.model)
+        model = nemo_asr.models.ASRModel.from_pretrained(model_name=STT_MODEL)
         model = model.to(device)
         model.eval()
         return model
@@ -83,6 +88,12 @@ class Transcriber:
             raise RuntimeError("Parakeet returned no results")
         return results[0]
 
+    def _fix(self, text: str) -> str:
+        """Apply configured word replacements to transcribed text."""
+        for pattern, replacement in self._replacements:
+            text = pattern.sub(replacement, text)
+        return text
+
     def transcribe_file(self, audio_path: str | Path) -> str:
         """Transcribe an audio file."""
         audio_path = Path(audio_path)
@@ -91,7 +102,7 @@ class Transcriber:
 
         logger.info(f"Transcribing file: {audio_path}")
         result = self._run(str(audio_path))
-        return (result.text or "").strip()
+        return self._fix((result.text or "").strip())
 
     def transcribe_file_with_segments(
         self, audio_path: str | Path
@@ -103,7 +114,7 @@ class Transcriber:
 
         logger.info(f"Transcribing file with segments: {audio_path}")
         result = self._run(str(audio_path), timestamps=True)
-        return _segments_from_result(result)
+        return self._fix_segments(_segments_from_result(result))
 
     def transcribe_audio_with_segments(
         self,
@@ -114,7 +125,7 @@ class Transcriber:
         audio = normalize_audio(audio)
         logger.info(f"Transcribing audio with segments: {len(audio)} samples at {sample_rate}Hz")
         result = self._run(audio, timestamps=True)
-        return _segments_from_result(result)
+        return self._fix_segments(_segments_from_result(result))
 
     def transcribe_audio(
         self,
@@ -125,7 +136,7 @@ class Transcriber:
         audio = normalize_audio(audio)
         logger.info(f"Transcribing audio buffer: {len(audio)} samples at {sample_rate}Hz")
         result = self._run(audio)
-        return (result.text or "").strip()
+        return self._fix((result.text or "").strip())
 
     def transcribe_audio_with_words(
         self,
@@ -141,28 +152,26 @@ class Transcriber:
         logger.debug(f"Transcribing with words: {len(audio)} samples at {sample_rate}Hz")
         result = self._run(audio, timestamps=True)
 
-        text = (result.text or "").strip()
+        text = self._fix((result.text or "").strip())
         words: list[tuple[str, float, float, float]] = []
         for stamp in _word_stamps(result):
-            words.append((stamp["word"], float(stamp["start"]), float(stamp["end"]), 1.0))
+            words.append(
+                (self._fix(stamp["word"]), float(stamp["start"]), float(stamp["end"]), 1.0)
+            )
         return text, words
 
     def transcribe_partial(self, audio: np.ndarray) -> str:
         """Fast partial transcription for streaming use cases."""
         audio = normalize_audio(audio)
         result = self._run(audio)
-        return (result.text or "").strip()
+        return self._fix((result.text or "").strip())
 
-    def transcribe_stream(
-        self, audio: np.ndarray, sample_rate: int = STT_SAMPLE_RATE
-    ) -> Generator[str, None, None]:
-        """Yield text per detected segment.
-
-        Parakeet's inference is non-streaming; we yield each timestamped segment
-        once the full transcription completes.
-        """
-        for _start, _end, text in self.transcribe_audio_with_segments(audio, sample_rate):
-            yield text
+    def _fix_segments(
+        self, segments: list[tuple[float, float, str]]
+    ) -> list[tuple[float, float, str]]:
+        if not self._replacements:
+            return segments
+        return [(start, end, self._fix(text)) for start, end, text in segments]
 
     def unload(self) -> None:
         """Unload the model to free memory. No-op if not loaded."""
