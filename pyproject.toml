@@ -33,6 +33,10 @@ dependencies = [
     "speechbrain>=1.0.0,<1.1.0",
     # TTS (Kokoro-82M; needs espeak-ng at runtime for g2p fallback)
     "kokoro>=0.9.4",
+    # Not a direct dep (nemo -> resampy -> numba). Without a floor, a fresh
+    # unlocked resolve picks the newest numpy and backtracks numba to 0.53,
+    # whose unbounded metadata "accepts" it but can't build on Python 3.12.
+    "numba>=0.60",
     # WebRTC for real-time audio streaming
     "aiortc>=1.6.0",
     # Shared dependencies
