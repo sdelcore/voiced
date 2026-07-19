@@ -17,6 +17,9 @@ class TranscriptionConfig:
     model: str = "nvidia/parakeet-tdt-0.6b-v3"
     device: str = "auto"
     language: str = "en"
+    # Words the model habitually gets wrong, mapped to their fix.
+    # Matched case-insensitively on word boundaries after transcription.
+    replacements: dict[str, str] = field(default_factory=dict)
 
 
 @dataclass
@@ -231,6 +234,12 @@ unload_timeout_minutes = 15
 model = "nvidia/parakeet-tdt-0.6b-v3"  # NeMo ASRModel HF id
 device = "auto"          # auto, cuda, cpu
 language = "en"          # advisory only; Parakeet TDT v3 auto-detects
+
+# Fix words the model habitually mishears. Keys are matched
+# case-insensitively on word boundaries in the transcribed text.
+[transcription.replacements]
+# "cloud code" = "Claude Code"
+# "hyperland" = "Hyprland"
 
 [audio]
 sample_rate = 16000
