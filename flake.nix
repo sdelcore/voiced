@@ -151,7 +151,7 @@
             echo "Python: $(python --version)"
             echo "uv: $(uv --version)"
 
-            export LD_LIBRARY_PATH="${pkgs.portaudio}/lib:${pkgs.stdenv.cc.cc.lib}/lib:$LD_LIBRARY_PATH"
+            export LD_LIBRARY_PATH="${pkgs.portaudio}/lib:${pkgs.stdenv.cc.cc.lib}/lib:${pkgs.zlib}/lib:$LD_LIBRARY_PATH"
 
             if [ -d /run/opengl-driver/lib ]; then
               export LD_LIBRARY_PATH="/run/opengl-driver/lib:$LD_LIBRARY_PATH"
