@@ -244,7 +244,7 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
                         "-i",
                         temp_path,
                         "-ar",
-                        "16000",  # Resample to 16kHz (optimal for Whisper)
+                        "16000",  # Resample to 16kHz (Parakeet's expected rate)
                         "-ac",
                         "1",  # Convert to mono
                         "-f",
@@ -667,18 +667,21 @@ class TranscriptionHandler(BaseHTTPRequestHandler):
                     logger.warning("Chunk generation timeout")
                     break
 
+            gen_thread.join(timeout=5.0)
+
+            if generation_error:
+                # Headers are already sent; abort without the terminating chunk
+                # so the client sees a truncated stream instead of a clean end.
+                logger.error(f"Streaming synthesis error: {generation_error[0]}")
+                return
+
             # Write final chunk (empty)
             self.wfile.write(b"0\r\n\r\n")
             self.wfile.flush()
 
-            gen_thread.join(timeout=5.0)
-
-            if generation_error:
-                logger.error(f"Streaming synthesis error: {generation_error[0]}")
-            else:
-                duration = total_bytes / (synthesizer.sample_rate * 2)  # 2 bytes per sample
-                logger.info(f"Streamed {total_bytes} bytes ({duration:.2f}s of audio)")
-                TranscriptionHandler.tts_request_count += 1
+            duration = total_bytes / (synthesizer.sample_rate * 2)  # 2 bytes per sample
+            logger.info(f"Streamed {total_bytes} bytes ({duration:.2f}s of audio)")
+            TranscriptionHandler.tts_request_count += 1
 
         except Exception as e:
             logger.exception(f"Streaming synthesis failed: {e}")
@@ -846,12 +849,12 @@ class TranscriptionServer:
         while self._asyncio_loop is None:
             time.sleep(0.01)
 
-        # Pass the lazy accessors directly — WebRTC consumes them as the
-        # underlying objects, so any later lazy-load is reflected.
+        # Use the lazy properties so the sub-modules are constructed now;
+        # the raw attributes would be captured as None before first access.
         webrtc_manager = WebRTCConnectionManager(
             transcriber=self.voiced.transcriber,
-            synthesizer=self.voiced._synthesizer,
-            speaker_identifier=self.voiced._speaker_identifier,
+            synthesizer=self.voiced.synthesizer,
+            speaker_identifier=self.voiced.speaker_identifier,
         )
         webrtc_manager.set_event_loop(self._asyncio_loop)
 

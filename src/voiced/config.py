@@ -209,7 +209,7 @@ def get_server_url(cli_url: str | None = None) -> str:
     if cli_url:
         return cli_url
 
-    env_url = os.environ.get("STTD_SERVER_URL")
+    env_url = os.environ.get("VOICED_SERVER_URL")
     if env_url:
         return env_url
 

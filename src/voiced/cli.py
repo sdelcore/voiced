@@ -63,7 +63,6 @@ def main(ctx: click.Context, verbose: bool) -> None:
 @click.option("--http", is_flag=True, help="Enable embedded HTTP server for remote transcription")
 @click.option("--http-host", default=None, help="HTTP server host (default: from config)")
 @click.option("--http-port", default=None, type=int, help="HTTP server port (default: from config)")
-@click.option("--no-vad", is_flag=True, help="Disable voice activity detection")
 @click.pass_context
 def start(
     ctx: click.Context,
@@ -71,7 +70,6 @@ def start(
     http: bool,
     http_host: str | None,
     http_port: int | None,
-    no_vad: bool,
 ) -> None:
     """Start the voiced daemon.
 
@@ -95,10 +93,6 @@ def start(
         sys.exit(1)
 
     config = load_config()
-
-    # Override VAD if --no-vad is set
-    if no_vad:
-        config.vad.enabled = False
 
     # Determine effective HTTP settings
     http_enabled = http or config.daemon.http_enabled
@@ -132,14 +126,12 @@ def start(
 @click.option("--host", default=None, help="Host to bind to (default: 127.0.0.1)")
 @click.option("--port", default=None, type=int, help="Port to bind to (default: 8765)")
 @click.option("--daemon", "-d", is_flag=True, help="Run in background")
-@click.option("--no-vad", is_flag=True, help="Disable voice activity detection")
 @click.pass_context
 def server(
     ctx: click.Context,
     host: str | None,
     port: int | None,
     daemon: bool,
-    no_vad: bool,
 ) -> None:
     """Start the transcription HTTP server.
 
@@ -163,10 +155,6 @@ def server(
     from voiced.http_server import TranscriptionServer
 
     config = load_config()
-
-    # Override VAD if --no-vad is set
-    if no_vad:
-        config.vad.enabled = False
 
     effective_host = host or config.server.host
     effective_port = port or config.server.port
@@ -213,7 +201,7 @@ def client_cmd(
     """Start the remote client daemon.
 
     Records audio locally and sends to a remote server for transcription.
-    The server URL can be set via CLI, environment variable (STTD_SERVER_URL),
+    The server URL can be set via CLI, environment variable (VOICED_SERVER_URL),
     or config file.
 
     Examples:
@@ -222,7 +210,7 @@ def client_cmd(
 
         voiced client -d                  # Run in background
 
-        STTD_SERVER_URL=http://server:8765 voiced client
+        VOICED_SERVER_URL=http://server:8765 voiced client
     """
     from voiced.config import get_server_url
     from voiced.daemon import daemonize
@@ -435,7 +423,6 @@ def status() -> None:
 @click.option(
     "--timeout", type=float, default=300.0, help="Request timeout in seconds (default: 300)"
 )
-@click.option("--no-vad", is_flag=True, help="Disable voice activity detection")
 def transcribe(
     audio_file: Path,
     output: Path | None,
@@ -445,7 +432,6 @@ def transcribe(
     num_speakers: int | None,
     server_url: str | None,
     timeout: float,
-    no_vad: bool,
 ) -> None:
     """Transcribe an audio file.
 
@@ -472,8 +458,6 @@ def transcribe(
         config.transcription.model = model
     if device:
         config.transcription.device = device
-    if no_vad:
-        config.vad.enabled = False
 
     click.echo(f"Transcribing: {audio_file}", err=True)
 

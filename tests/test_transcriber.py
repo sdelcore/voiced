@@ -155,21 +155,6 @@ class TestTranscribeMocked:
         audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
         assert transcriber.transcribe_partial(audio) == "partial"
 
-    def test_transcribe_stream_yields_segment_text(self):
-        transcriber = Transcriber()
-        self._stub_model(
-            transcriber,
-            _fake_result(
-                text="a b",
-                segments=[
-                    {"start": 0.0, "end": 0.1, "segment": "a"},
-                    {"start": 0.1, "end": 0.2, "segment": "b"},
-                ],
-            ),
-        )
-        audio = np.zeros(STT_SAMPLE_RATE, dtype=np.float32)
-        assert list(transcriber.transcribe_stream(audio)) == ["a", "b"]
-
     def test_empty_results_raises(self):
         transcriber = Transcriber()
         model = MagicMock()

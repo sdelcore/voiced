@@ -1,7 +1,6 @@
 """Transcription engine using NVIDIA Parakeet-TDT (NeMo)."""
 
 import logging
-from collections.abc import Generator
 from pathlib import Path
 from typing import Any
 
@@ -152,17 +151,6 @@ class Transcriber:
         audio = normalize_audio(audio)
         result = self._run(audio)
         return (result.text or "").strip()
-
-    def transcribe_stream(
-        self, audio: np.ndarray, sample_rate: int = STT_SAMPLE_RATE
-    ) -> Generator[str, None, None]:
-        """Yield text per detected segment.
-
-        Parakeet's inference is non-streaming; we yield each timestamped segment
-        once the full transcription completes.
-        """
-        for _start, _end, text in self.transcribe_audio_with_segments(audio, sample_rate):
-            yield text
 
     def unload(self) -> None:
         """Unload the model to free memory. No-op if not loaded."""
