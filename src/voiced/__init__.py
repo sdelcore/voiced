@@ -23,7 +23,7 @@ With speaker identification:
         print(f"[{seg.start:.1f}-{seg.end:.1f}] {seg.speaker}: {seg.text}")
 """
 
-__version__ = "0.3.0"
+__version__ = "0.5.0"
 
 # Public names are resolved lazily (PEP 562) so importing the package does not
 # pull in torch, sounddevice, or the diarization stack. The daemon parent
