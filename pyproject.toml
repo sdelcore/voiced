@@ -1,6 +1,6 @@
 [project]
 name = "voiced"
-version = "0.4.0"
+version = "0.5.0"
 description = "Voice daemon - Speech-to-Text and Text-to-Speech for Linux/Wayland"
 readme = "README.md"
 requires-python = ">=3.10"

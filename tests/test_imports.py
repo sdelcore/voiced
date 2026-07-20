@@ -9,7 +9,7 @@ class TestPublicImports:
         from voiced import __version__
 
         assert isinstance(__version__, str)
-        assert __version__ == "0.3.0"
+        assert __version__ == "0.5.0"
 
     def test_import_transcriber(self):
         """Test Transcriber class is importable."""
