@@ -25,54 +25,46 @@ With speaker identification:
 
 __version__ = "0.3.0"
 
-# Core transcription
-# Configuration classes
-from voiced.config import (
-    AudioConfig,
-    Config,
-    DiarizationConfig,
-    TranscriptionConfig,
-)
-
-# Speaker identification
-from voiced.diarizer import (
-    ENROLLMENT_PROMPT,
-    DiarizedSegment,
-    IdentifiedSegment,
-    SpeakerDiarizer,
-    SpeakerEmbedder,
-    SpeakerIdentifier,
-    align_transcription_with_diarization,
-)
-
-# Voice profiles
-from voiced.profiles import ProfileManager, VoiceProfile
-
-# Audio recording
-from voiced.recorder import Recorder
-from voiced.transcriber import Transcriber
-
-__all__ = [
-    # Version
-    "__version__",
+# Public names are resolved lazily (PEP 562) so importing the package does not
+# pull in torch, sounddevice, or the diarization stack. The daemon parent
+# process depends on this: GPU-touching modules must only be imported inside
+# the inference worker process.
+_EXPORTS = {
     # Transcription
-    "Transcriber",
-    "TranscriptionConfig",
+    "Transcriber": "voiced.transcriber",
+    "TranscriptionConfig": "voiced.config",
     # Recording
-    "Recorder",
-    "AudioConfig",
-    # Speaker identification
-    "SpeakerEmbedder",
-    "SpeakerIdentifier",
-    "SpeakerDiarizer",
-    "IdentifiedSegment",
-    "DiarizedSegment",
-    "DiarizationConfig",
-    "ENROLLMENT_PROMPT",
-    "align_transcription_with_diarization",
+    "Recorder": "voiced.recorder",
+    "AudioConfig": "voiced.config",
+    # Speaker identification (segment types/alignment are torch-free)
+    "SpeakerEmbedder": "voiced.diarizer",
+    "SpeakerIdentifier": "voiced.diarizer",
+    "SpeakerDiarizer": "voiced.diarizer",
+    "IdentifiedSegment": "voiced.speaker_segments",
+    "DiarizedSegment": "voiced.speaker_segments",
+    "DiarizationConfig": "voiced.config",
+    "ENROLLMENT_PROMPT": "voiced.diarizer",
+    "align_transcription_with_diarization": "voiced.speaker_segments",
     # Profiles
-    "VoiceProfile",
-    "ProfileManager",
+    "VoiceProfile": "voiced.profiles",
+    "ProfileManager": "voiced.profiles",
     # Configuration
-    "Config",
-]
+    "Config": "voiced.config",
+}
+
+__all__ = ["__version__", *_EXPORTS]
+
+
+def __getattr__(name: str):
+    module_name = _EXPORTS.get(name)
+    if module_name is None:
+        raise AttributeError(f"module 'voiced' has no attribute '{name}'")
+    import importlib
+
+    value = getattr(importlib.import_module(module_name), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(__all__)

@@ -214,8 +214,8 @@ voiced config --init
 Configuration file: `~/.config/voiced/config.toml`
 
 ```toml
-# Auto-unload idle STT/TTS models from the GPU after this many minutes
-# (0 = never). Shared by both so they always match.
+# Stop the STT/TTS inference worker process after this many idle minutes,
+# releasing all model VRAM (0 = never). Shared by STT and TTS.
 unload_timeout_minutes = 15
 
 [transcription]

@@ -157,6 +157,53 @@ class TestShutdown:
         # holding leases across shutdown. This test documents that.
 
 
+class TestInvalidate:
+    """Crash support: drop a dead resource so the next use() reloads."""
+
+    def test_invalidate_drops_current_model(self):
+        calls = []
+
+        def loader():
+            calls.append(1)
+            return FakeModel()
+
+        host = ModelHost(loader=loader)
+        with host.use() as model:
+            pass
+        assert host.invalidate(model) is True
+        assert not host.is_loaded
+        with host.use():
+            pass
+        assert calls == [1, 1]
+
+    def test_invalidate_stale_model_is_noop(self):
+        host = ModelHost(loader=FakeModel)
+        with host.use() as model:
+            pass
+        stale = FakeModel()
+        assert host.invalidate(stale) is False
+        assert host.is_loaded
+        assert host.invalidate(model) is True
+
+    def test_invalidate_does_not_fire_on_unload(self):
+        unloaded = []
+        host = ModelHost(loader=FakeModel, on_unload=lambda m: unloaded.append(m))
+        with host.use() as model:
+            pass
+        host.invalidate(model)
+        assert unloaded == []
+
+    def test_invalidate_with_active_lease(self):
+        """A crashing worker is invalidated while requests still hold leases."""
+        host = ModelHost(loader=FakeModel)
+        with host.use() as model:
+            assert host.invalidate(model) is True
+            assert not host.is_loaded
+        # Lease release after invalidation must not corrupt the host
+        with host.use():
+            pass
+
+
 class TestRaceFix:
     """The original Synthesizer bug: idle timer firing mid-use."""
 

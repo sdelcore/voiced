@@ -38,11 +38,14 @@ class LocalProfileStore:
         manager: ProfileManager | None = None,
         diarization_config: DiarizationConfig | None = None,
         device: str | None = None,
+        embedder=None,
     ):
         self._manager = manager or ProfileManager()
         self._diar_cfg = diarization_config or DiarizationConfig()
         self._device = device
-        self._embedder = None  # SpeakerEmbedder, lazily constructed
+        # Injected embedder (e.g. worker-backed) or a SpeakerEmbedder
+        # lazily constructed in this process when none is provided.
+        self._embedder = embedder
 
     def _get_embedder(self):
         if self._embedder is None:

@@ -49,17 +49,21 @@ voiced is a voice daemon for Wayland/Hyprland that provides both:
 CLI Command → Unix Socket IPC → Daemon
                                   ├── Server (server.py) - Unix socket handler
                                   ├── Recorder (recorder.py) - sounddevice audio capture
-                                  ├── Transcriber (transcriber.py) - Parakeet-TDT STT
-                                  ├── Synthesizer (synthesizer.py) - Kokoro TTS
+                                  ├── WorkerHost (worker_host.py) - Inference Worker supervisor + proxies
                                   ├── Injector (injector.py) - wl-clipboard text injection
                                   └── TrayIcon (tray.py) - D-Bus StatusNotifierItem
+                                        │ pipe IPC (spawn)
+                                  Inference Worker (worker.py) - disposable child process
+                                  ├── Transcriber (transcriber.py) - Parakeet-TDT STT
+                                  ├── Synthesizer (synthesizer.py) - Kokoro TTS
+                                  └── Diarizer (diarizer.py) - SpeechBrain speaker ID
 ```
 
 ### Key Design Patterns
 
-**Record-then-Transcribe (STT)**: Toggle once to start recording (RED tray icon), toggle again to stop and begin batch transcription (YELLOW icon). When complete (BLUE icon), text is copied to clipboard.
+**Record-then-Transcribe (STT)**: Toggle once to start recording (RED tray icon), toggle again to stop and begin batch transcription (YELLOW icon). When complete (BLUE icon), text is copied to clipboard. Starting a recording also warms the Inference Worker in the background so the stop-toggle doesn't pay worker-spawn + model-load latency.
 
-**Lazy Model Loading (TTS)**: TTS model loaded on first request, auto-unloaded after the shared idle timeout (default 15 min) to free GPU memory.
+**Disposable Inference Worker**: STT/TTS inference runs in a child process spawned lazily on the first request (`worker_host.py` parent side, `worker.py` child side). After the shared idle timeout (default 15 min) with no active operations, the worker process is terminated — process exit is what reliably releases VRAM; `torch.cuda.empty_cache()` in a live process does not. The next request transparently starts a fresh worker. The parent process must never import torch/NeMo/Kokoro (guarded by `tests/test_parent_imports.py`).
 
 **HTTP Client-Server Mode**: For remote STT/TTS:
 - `http_server.py` - HTTP server with `/transcribe`, `/synthesize`, `/health` endpoints

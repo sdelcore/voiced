@@ -1,7 +1,6 @@
 """Speaker identification using SpeechBrain ECAPA-TDNN embeddings."""
 
 import logging
-from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
@@ -17,6 +16,15 @@ if not hasattr(torchaudio, "list_audio_backends"):
 from voiced.config import DiarizationConfig
 from voiced.profiles import ProfileManager, VoiceProfile
 
+# Segment types and alignment live in the torch-free voiced.speaker_segments
+# module (the daemon parent uses them without importing this torch-heavy
+# one); re-exported here for backward compatibility.
+from voiced.speaker_segments import (  # noqa: F401
+    DiarizedSegment,
+    IdentifiedSegment,
+    align_transcription_with_diarization,
+)
+
 logger = logging.getLogger(__name__)
 
 SPEAKER_MODEL = "speechbrain/spkrec-ecapa-voxceleb"
@@ -26,21 +34,6 @@ ENROLLMENT_PROMPT = (
     "These take the shape of a long round arch with its path high above "
     "and its two ends apparently beyond the horizon."
 )
-
-
-@dataclass
-class IdentifiedSegment:
-    """A transcription segment with speaker identification."""
-
-    start: float
-    end: float
-    text: str
-    speaker: str
-    confidence: float
-
-
-# Backward compatibility alias
-DiarizedSegment = IdentifiedSegment
 
 
 class SpeakerEmbedder:
@@ -639,58 +632,3 @@ class SpeakerDiarizer:
             self._embedder.unload()
             self._embedder = None
         logger.info("SpeakerDiarizer models unloaded")
-
-
-def align_transcription_with_diarization(
-    transcription_segments: list[tuple[float, float, str]],
-    diarization_segments: list[IdentifiedSegment],
-) -> list[IdentifiedSegment]:
-    """Align Whisper transcription with diarization speaker labels.
-
-    For each transcription segment, assigns the speaker with maximum
-    temporal overlap from diarization.
-
-    Args:
-        transcription_segments: (start, end, text) from Whisper.
-        diarization_segments: IdentifiedSegment from diarization.
-
-    Returns:
-        List of IdentifiedSegment with speaker labels and text.
-    """
-    results = []
-
-    for trans_start, trans_end, text in transcription_segments:
-        overlaps: dict[str, float] = {}
-        confidences: dict[str, float] = {}
-
-        for diar_seg in diarization_segments:
-            overlap_start = max(trans_start, diar_seg.start)
-            overlap_end = min(trans_end, diar_seg.end)
-            overlap = max(0, overlap_end - overlap_start)
-
-            if overlap > 0:
-                overlaps[diar_seg.speaker] = overlaps.get(diar_seg.speaker, 0) + overlap
-                if (
-                    diar_seg.speaker not in confidences
-                    or diar_seg.confidence > confidences[diar_seg.speaker]
-                ):
-                    confidences[diar_seg.speaker] = diar_seg.confidence
-
-        if overlaps:
-            speaker = max(overlaps.keys(), key=lambda k: overlaps[k])
-            confidence = confidences.get(speaker, 0.0)
-        else:
-            speaker = "Unknown"
-            confidence = 0.0
-
-        results.append(
-            IdentifiedSegment(
-                start=trans_start,
-                end=trans_end,
-                text=text,
-                speaker=speaker,
-                confidence=confidence,
-            )
-        )
-
-    return results

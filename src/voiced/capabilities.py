@@ -10,6 +10,7 @@ query string) are NOT part of the Voiced facade; callers that need them
 construct an ad-hoc adapter for that request.
 """
 
+import importlib.util
 import logging
 from dataclasses import dataclass
 
@@ -17,7 +18,7 @@ import numpy as np
 
 from voiced.config import Config, load_config
 from voiced.profile_store import LocalProfileStore, ProfileStore
-from voiced.transcriber import Transcriber
+from voiced.worker_host import WorkerHost, WorkerSpeakerEmbedder, WorkerTranscriber
 
 logger = logging.getLogger(__name__)
 
@@ -54,12 +55,14 @@ class Voiced:
     def __init__(
         self,
         config: Config,
-        transcriber: Transcriber,
+        transcriber,
         profile_store: ProfileStore,
+        worker_host: WorkerHost | None = None,
     ):
         self.config = config
         self.transcriber = transcriber
         self.profile_store = profile_store
+        self._worker_host = worker_host
 
         # Lazily constructed — touched only when first accessed
         self._synthesizer = None
@@ -69,15 +72,27 @@ class Voiced:
 
     @classmethod
     def from_config(cls, config: Config | None = None) -> "Voiced":
-        """Build a Voiced from a Config, constructing default sub-modules."""
+        """Build a Voiced from a Config, constructing default sub-modules.
+
+        STT/TTS inference runs in a disposable worker process (spawned on
+        first use, terminated after the shared idle timeout) so this process
+        never holds model VRAM.
+        """
         cfg = config or load_config()
+        worker_host = WorkerHost(
+            cfg,
+            idle_timeout=(
+                cfg.unload_timeout_minutes * 60 if cfg.unload_timeout_minutes > 0 else None
+            ),
+        )
         return cls(
             config=cfg,
-            transcriber=Transcriber(
-                cfg.transcription,
-                unload_timeout_minutes=cfg.unload_timeout_minutes,
+            transcriber=WorkerTranscriber(worker_host, cfg.transcription),
+            profile_store=LocalProfileStore(
+                diarization_config=cfg.diarization,
+                embedder=WorkerSpeakerEmbedder(worker_host),
             ),
-            profile_store=LocalProfileStore(diarization_config=cfg.diarization),
+            worker_host=worker_host,
         )
 
     # ----- lazy capabilities -----
@@ -88,13 +103,19 @@ class Voiced:
         if self._synthesizer is not None:
             return self._synthesizer
 
-        from voiced.synthesizer import Synthesizer, TTSConfig, check_kokoro_installed
-
         if not self.config.tts.enabled:
             return None
-        if not check_kokoro_installed():
+        if importlib.util.find_spec("kokoro") is None:
             logger.warning("Kokoro is not installed; TTS unavailable")
             return None
+
+        if self._worker_host is not None:
+            from voiced.worker_host import WorkerSynthesizer
+
+            self._synthesizer = WorkerSynthesizer(self._worker_host, self.config)
+            return self._synthesizer
+
+        from voiced.synthesizer import Synthesizer, TTSConfig
 
         tts_config = TTSConfig(
             device=self.config.tts.device,
@@ -109,18 +130,28 @@ class Voiced:
     def speaker_identifier(self):
         """The per-segment speaker identifier. Used by WebRTC for real-time matching."""
         if self._speaker_identifier is None:
-            from voiced.diarizer import SpeakerIdentifier
+            if self._worker_host is not None:
+                from voiced.worker_host import WorkerDiarizer
 
-            self._speaker_identifier = SpeakerIdentifier(config=self.config.diarization)
+                self._speaker_identifier = WorkerDiarizer(self._worker_host)
+            else:
+                from voiced.diarizer import SpeakerIdentifier
+
+                self._speaker_identifier = SpeakerIdentifier(config=self.config.diarization)
         return self._speaker_identifier
 
     @property
     def speaker_diarizer(self):
         """The clustering diarizer. Used by batch transcribe (CLI + HTTP /transcribe)."""
         if self._speaker_diarizer is None:
-            from voiced.diarizer import SpeakerDiarizer
+            if self._worker_host is not None:
+                from voiced.worker_host import WorkerDiarizer
 
-            self._speaker_diarizer = SpeakerDiarizer(config=self.config.diarization)
+                self._speaker_diarizer = WorkerDiarizer(self._worker_host)
+            else:
+                from voiced.diarizer import SpeakerDiarizer
+
+                self._speaker_diarizer = SpeakerDiarizer(config=self.config.diarization)
         return self._speaker_diarizer
 
     @property
@@ -157,8 +188,6 @@ class Voiced:
                 used by the HTTP handler when a request specifies a custom
                 profiles path.
         """
-        from voiced.diarizer import align_transcription_with_diarization
-
         segments_raw = self.transcriber.transcribe_audio_with_segments(audio, sample_rate)
         full_text = " ".join(t for _, _, t in segments_raw).strip()
         duration = len(audio) / sample_rate if sample_rate else 0.0
@@ -169,6 +198,8 @@ class Voiced:
                 segments=_segments_unlabeled(segments_raw),
                 duration=duration,
             )
+
+        from voiced.speaker_segments import align_transcription_with_diarization
 
         store = profile_store or self.profile_store
         try:
@@ -216,6 +247,11 @@ class Voiced:
                 self.transcriber.unload()
             except Exception:
                 logger.exception("Transcriber unload failed")
+        if self._worker_host is not None:
+            try:
+                self._worker_host.shutdown()
+            except Exception:
+                logger.exception("Worker host shutdown failed")
 
 
 def _segments_unlabeled(
