@@ -28,6 +28,10 @@ _Avoid_: speaker, identity, user.
 A reference voice used by the TTS engine to synthesise speech. Cached per voice name.
 _Avoid_: speaker, model voice.
 
+**Inference Worker**:
+The disposable child process that runs all STT/TTS model inference. Started lazily on the first operation, terminated after the shared idle timeout so the CUDA driver releases its VRAM. The daemon never loads models in its own process.
+_Avoid_: subprocess, model server, backend.
+
 ## Relationships
 
 - A **Recording Session** has exactly one **Session State** at any time
@@ -35,6 +39,7 @@ _Avoid_: speaker, model voice.
 - Every user `toggle` returns a **Toggle Outcome**
 - A **Transcription Result** may be enriched with **Voice Profile** matches when diarisation is enabled
 - The TTS path is independent of Recording Sessions and operates over **Voice Presets**
+- All STT and TTS inference executes inside the **Inference Worker**; the worker is never terminated while an operation or stream is active
 
 ## Example dialogue
 

@@ -1,10 +1,14 @@
-"""Voice preset management for TTS (Kokoro voice packs)."""
+"""Voice preset management for TTS (Kokoro voice packs).
+
+torch is imported lazily in ``load_voice_tensor`` so listing/downloading
+voices from the parent process does not pull torch in.
+"""
 
 import logging
 from pathlib import Path
+from typing import Any
 
 import requests
-import torch
 
 logger = logging.getLogger(__name__)
 
@@ -58,7 +62,7 @@ class VoiceManager:
             cache_dir = Path.home() / ".cache" / "voiced" / "voices"
         self.cache_dir = cache_dir
         self.cache_dir.mkdir(parents=True, exist_ok=True)
-        self._voice_cache: dict[str, torch.Tensor] = {}
+        self._voice_cache: dict[str, Any] = {}
 
     def _filename(self, voice: str) -> str:
         return f"{voice}.pt"
@@ -191,7 +195,7 @@ class VoiceManager:
             return self.download(voice)
         return self.cache_dir / self._filename(voice)
 
-    def load_voice_tensor(self, voice: str) -> torch.Tensor:
+    def load_voice_tensor(self, voice: str) -> Any:
         """Load a voice pack as a tensor, downloading if needed.
 
         Args:
@@ -200,6 +204,8 @@ class VoiceManager:
         Returns:
             Voice style tensor for the Kokoro pipeline
         """
+        import torch
+
         voice = voice.lower()
         if voice in self._voice_cache:
             return self._voice_cache[voice]

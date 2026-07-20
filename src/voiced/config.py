@@ -91,7 +91,9 @@ class Config:
     """Main configuration container."""
 
     # Shared across STT and TTS so the two model lifecycles never drift.
-    unload_timeout_minutes: int = 15  # Auto-unload idle models (0 = never)
+    # Idle time before the inference worker process is terminated,
+    # releasing all model VRAM (0 = never).
+    unload_timeout_minutes: int = 15
 
     transcription: TranscriptionConfig = field(default_factory=TranscriptionConfig)
     audio: AudioConfig = field(default_factory=AudioConfig)
@@ -223,8 +225,8 @@ def save_default_config() -> None:
     config_path.parent.mkdir(parents=True, exist_ok=True)
 
     default_config = """\
-# Auto-unload idle STT/TTS models from the GPU after this many minutes (0 = never).
-# Shared by both so they always match.
+# Stop the STT/TTS inference worker process after this many idle minutes,
+# releasing all model VRAM (0 = never). Shared by STT and TTS.
 unload_timeout_minutes = 15
 
 [transcription]

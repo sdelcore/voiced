@@ -74,6 +74,23 @@ class ModelHost(Generic[T]):
                 if self._refcount == 0 and self._idle_timeout and not self._shutdown:
                     self._schedule_idle_unload()
 
+    def invalidate(self, model: T) -> bool:
+        """Drop ``model`` if it is the currently held instance.
+
+        Used when the held resource has died out from under us (e.g. a worker
+        process crash): active leases keep their now-dead reference and their
+        in-flight operations fail on their own, but the next ``use()`` gets a
+        fresh load. ``on_unload`` is NOT fired — the caller is responsible for
+        cleaning up the dead resource. Returns True if the model was dropped.
+        """
+        with self._lock:
+            if self._model is not model:
+                return False
+            self._cancel_timer()
+            self._model = None
+            logger.info(f"{self._name} invalidated")
+            return True
+
     def unload(self) -> None:
         """Forcibly unload the model. Raises if any leases are active."""
         with self._lock:

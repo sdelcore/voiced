@@ -309,13 +309,11 @@ class Daemon:
             self._tray.start()
             logger.info("Tray icon started")
 
-            # Build the voice-capabilities composition root
+            # Build the voice-capabilities composition root. No model is
+            # loaded here: the inference worker process starts lazily on the
+            # first STT/TTS operation and is terminated after the idle
+            # timeout so its VRAM returns to the system.
             self._voiced = Voiced.from_config(self.config)
-
-            # Pre-load transcription model
-            logger.info("Pre-loading transcription model...")
-            self._voiced.transcriber.warmup()
-            logger.info("Model loaded")
 
             # Recording session — owns state, recorder, transcription worker
             self._session = RecordingSession(

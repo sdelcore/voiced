@@ -117,6 +117,25 @@ class TestStateMachine:
         assert _wait_until(lambda: session.state == SessionState.IDLE, timeout=2.0)
 
 
+class TestWarmup:
+    def test_record_start_warms_transcriber(self, session: RecordingSession, fake_transcriber):
+        session.toggle()
+        assert _wait_until(lambda: fake_transcriber.warmup.called, timeout=2.0)
+
+    def test_warmup_failure_does_not_break_session(
+        self, session: RecordingSession, fake_transcriber
+    ):
+        fake_transcriber.warmup.side_effect = RuntimeError("no GPU for you")
+        results: list[TranscriptionResult] = []
+        session.on_result(results.append)
+
+        session.toggle()
+        assert _wait_until(lambda: fake_transcriber.warmup.called, timeout=2.0)
+        session.toggle()
+        assert _wait_until(lambda: len(results) == 1, timeout=2.0)
+        assert results[0].text == "hello world"
+
+
 class TestCallbacks:
     def test_state_change_callback_fires(self, session: RecordingSession):
         events: list[tuple[SessionState, SessionState]] = []

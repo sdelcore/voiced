@@ -199,7 +199,24 @@ class RecordingSession:
         old = self._state
         self._state = SessionState.RECORDING
         self._enqueue_state_change(old, self._state)
+
+        # Warm the transcriber while the user is talking so the stop-toggle
+        # doesn't pay worker-spawn + model-load latency after an idle period.
+        threading.Thread(
+            target=self._warmup_transcriber,
+            daemon=True,
+            name="RecordingSessionWarmup",
+        ).start()
         return ToggleOutcome.started()
+
+    def _warmup_transcriber(self) -> None:
+        try:
+            self._transcriber.warmup()
+        except Exception:
+            logger.warning(
+                "Transcriber warmup failed; transcription will retry on stop",
+                exc_info=True,
+            )
 
     def _stop_recording_locked(self) -> ToggleOutcome:
         recorder = self._recorder

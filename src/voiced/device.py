@@ -1,8 +1,13 @@
-"""Device, dtype, and attention-implementation resolution for torch models."""
+"""Device, dtype, and attention-implementation resolution for torch models.
+
+torch is imported lazily inside ``resolve_device_config`` so that modules
+which merely import this one (transcriber, capabilities, daemon) stay free
+of torch in the parent process — resolution only happens in the inference
+worker or in short-lived CLI processes.
+"""
 
 from dataclasses import dataclass
-
-import torch
+from typing import Any
 
 
 @dataclass(frozen=True)
@@ -10,7 +15,7 @@ class DeviceConfig:
     """Resolved torch device, dtype, and attention implementation."""
 
     device: str
-    dtype: torch.dtype
+    dtype: Any
     attn_impl: str
 
 
@@ -24,6 +29,8 @@ def resolve_device_config(requested: str = "auto") -> DeviceConfig:
     Returns:
         DeviceConfig with the chosen device, dtype, and attention implementation.
     """
+    import torch
+
     if requested == "auto":
         if torch.cuda.is_available():
             return DeviceConfig("cuda", torch.bfloat16, "flash_attention_2")

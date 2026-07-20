@@ -547,14 +547,17 @@ def _transcribe_local(
         audio = audio.mean(axis=1)
 
     voiced = Voiced.from_config(config)
-    if annotate:
-        click.echo("Running speaker diarization...", err=True)
-    result = voiced.transcribe(
-        audio,
-        sample_rate,
-        identify_speakers=annotate,
-        num_speakers=num_speakers,
-    )
+    try:
+        if annotate:
+            click.echo("Running speaker diarization...", err=True)
+        result = voiced.transcribe(
+            audio,
+            sample_rate,
+            identify_speakers=annotate,
+            num_speakers=num_speakers,
+        )
+    finally:
+        voiced.shutdown()
 
     if annotate and result.segments:
         text = "\n".join(
@@ -651,14 +654,17 @@ def record(
         from voiced.capabilities import Voiced
 
         voiced = Voiced.from_config(config)
-        if annotate:
-            click.echo("Running speaker diarization...", err=True)
-        result = voiced.transcribe(
-            audio_data,
-            config.audio.sample_rate,
-            identify_speakers=annotate,
-            num_speakers=num_speakers,
-        )
+        try:
+            if annotate:
+                click.echo("Running speaker diarization...", err=True)
+            result = voiced.transcribe(
+                audio_data,
+                config.audio.sample_rate,
+                identify_speakers=annotate,
+                num_speakers=num_speakers,
+            )
+        finally:
+            voiced.shutdown()
 
         click.echo(f"Found {len(result.segments)} segment(s)", err=True)
 
