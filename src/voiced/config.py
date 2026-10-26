@@ -124,6 +124,11 @@ def get_socket_path() -> Path:
     return get_cache_dir() / "control.sock"
 
 
+def get_client_socket_path() -> Path:
+    """Get the local control socket path for the remote client daemon."""
+    return get_cache_dir() / "client-control.sock"
+
+
 def get_pid_path() -> Path:
     """Get the path to the PID file."""
     return get_cache_dir() / "daemon.pid"

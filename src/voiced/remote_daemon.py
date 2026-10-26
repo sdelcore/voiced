@@ -16,9 +16,10 @@ from urllib.request import Request, urlopen
 import numpy as np
 
 from voiced import audio
-from voiced.config import Config, get_cache_dir, load_config
+from voiced.config import Config, get_cache_dir, get_client_socket_path, load_config
 from voiced.injector import inject_to_clipboard
 from voiced.recorder import Recorder
+from voiced.server import Server
 from voiced.tray import TrayIcon, TrayState
 from voiced.webrtc_client import SyncWebRTCClient, WebRTCClientConfig
 
@@ -59,11 +60,12 @@ class RemoteDaemon:
         )
 
         self._state = ClientState.IDLE
-        self._running = False
+        self._state_lock = threading.Lock()
         self._shutdown_event = threading.Event()
 
         self._recorder: Recorder | None = None
         self._tray: TrayIcon | None = None
+        self._control_server: Server | None = None
 
         self._pid_path = get_cache_dir() / "client.pid"
 
@@ -94,12 +96,12 @@ class RemoteDaemon:
                 logger.warning(f"Failed to remove PID file: {e}")
 
     def _handle_toggle(self) -> dict:
-        """Handle toggle command."""
-        if self._state == ClientState.IDLE:
-            return self._start_recording()
-        elif self._state == ClientState.RECORDING:
-            return self._stop_and_send()
-        else:
+        """Serialize tray and hotkey toggles against recording state changes."""
+        with self._state_lock:
+            if self._state == ClientState.IDLE:
+                return self._start_recording()
+            if self._state == ClientState.RECORDING:
+                return self._stop_and_send()
             return {
                 "status": "busy",
                 "message": f"Client is busy ({self._state.value})",
@@ -205,6 +207,23 @@ class RemoteDaemon:
         }
         self._tray.set_state(state_map.get(self._state, TrayState.IDLE))
 
+    def _handle_client_status(self, _args: dict) -> dict:
+        """Report the local remote-client state and inference endpoint."""
+        return {
+            "status": "ok",
+            "state": self._state.value,
+            "server": self.server_url,
+        }
+
+    def _handle_client_stop(self, _args: dict) -> dict:
+        """Request shutdown of the local remote client daemon."""
+        self._shutdown_event.set()
+        return {"status": "ok"}
+
+    def _handle_client_toggle(self, _args: dict) -> dict:
+        """Handle a toggle command from the local CLI socket."""
+        return self._handle_toggle()
+
     def _on_tray_toggle(self) -> None:
         """Handle tray icon toggle click."""
         self._handle_toggle()
@@ -253,6 +272,12 @@ class RemoteDaemon:
         self._write_pid()
 
         try:
+            self._control_server = Server(get_client_socket_path())
+            self._control_server.register_handler("toggle", self._handle_client_toggle)
+            self._control_server.register_handler("status", self._handle_client_status)
+            self._control_server.register_handler("stop", self._handle_client_stop)
+            self._control_server.start()
+
             self._tray = TrayIcon(
                 on_toggle=self._on_tray_toggle,
                 on_quit=self._on_tray_quit,
@@ -271,6 +296,9 @@ class RemoteDaemon:
             raise
         finally:
             self._cleanup()
+            if self._control_server is not None:
+                self._control_server.stop()
+                self._control_server = None
 
     def _cleanup(self) -> None:
         """Clean up resources."""
