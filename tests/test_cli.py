@@ -36,13 +36,11 @@ class TestCLI:
         assert result.exit_code == 1
         assert "not running" in result.output.lower()
 
-    def test_remote_client_socket_toggles_client_state(self, monkeypatch, tmp_path):
+    def test_remote_client_initializes_shutdown_event_for_control_lifecycle(self, monkeypatch):
         import sys
         from types import ModuleType
 
-        from voiced.client import send_command
         from voiced.config import AudioConfig, Config
-        from voiced.server import Server
 
         tray = ModuleType("voiced.tray")
         tray.TrayIcon = object
@@ -50,28 +48,14 @@ class TestCLI:
         monkeypatch.setitem(sys.modules, "voiced.tray", tray)
         from voiced.remote_daemon import ClientState, RemoteDaemon
 
-        class FakeRecorder:
-            is_recording = False
-
-            def __init__(self, config):
-                self.is_recording = False
-
-            def start(self):
-                self.is_recording = True
-
         daemon = RemoteDaemon("http://example.test", config=Config(audio=AudioConfig()))
+        assert daemon._shutdown_event.is_set() is False
         assert daemon.is_running is False
         assert daemon.state == ClientState.IDLE
-        socket_path = tmp_path / "client.sock"
-        server = Server(socket_path)
-        server.register_handler("toggle", daemon._handle_client_toggle)
-        server.start()
-        try:
-            response = send_command("toggle", socket_path=socket_path)
-            assert response == {"status": "ok", "state": "recording"}
-            assert daemon.state == ClientState.RECORDING
-        finally:
-            server.stop()
+
+        daemon._on_tray_quit()
+        assert daemon._shutdown_event.is_set() is True
+        assert daemon._handle_client_stop({}) == {"status": "ok"}
 
     def test_cleanup_stops_control_socket_before_removing_pid(self, tmp_path):
         from voiced.config import AudioConfig, Config

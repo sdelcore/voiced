@@ -62,6 +62,7 @@ class RemoteDaemon:
         self._state = ClientState.IDLE
         self._running = False
         self._state_lock = threading.Lock()
+        self._shutdown_event = threading.Event()
 
         self._recorder: Recorder | None = None
         self._tray: TrayIcon | None = None
