@@ -164,7 +164,15 @@ voiced client -d                  # Run in background
 VOICED_SERVER_URL=http://server:8765 voiced client
 ```
 
-The client records audio locally, sends it to the server for transcription, and copies the result to clipboard.
+The client records audio locally, sends it to the server for transcription, and copies the result to clipboard. Its control commands use the explicit `--client` target:
+
+```bash
+voiced toggle --client
+voiced status --client
+voiced stop --client
+```
+
+The default commands (`voiced toggle`, `voiced status`, and `voiced stop`) still target the local full daemon. Client commands use a separate local Unix socket; the configured server URL is only for inference. If the selected process is not running, the command reports that target as unavailable rather than falling back to the other process.
 
 **Test with curl:**
 ```bash
