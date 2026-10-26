@@ -59,9 +59,9 @@ class TestCLI:
             def start(self):
                 self.is_recording = True
 
-        monkeypatch.setattr("voiced.remote_daemon.Recorder", FakeRecorder)
-        config = Config(audio=AudioConfig(beep_enabled=False))
-        daemon = RemoteDaemon("http://example.test", config=config)
+        daemon = RemoteDaemon("http://example.test", config=Config(audio=AudioConfig()))
+        assert daemon.is_running is False
+        assert daemon.state == ClientState.IDLE
         socket_path = tmp_path / "client.sock"
         server = Server(socket_path)
         server.register_handler("toggle", daemon._handle_client_toggle)
@@ -72,6 +72,26 @@ class TestCLI:
             assert daemon.state == ClientState.RECORDING
         finally:
             server.stop()
+
+    def test_cleanup_stops_control_socket_before_removing_pid(self, tmp_path):
+        from voiced.config import AudioConfig, Config
+        from voiced.remote_daemon import RemoteDaemon
+
+        class FakeControlServer:
+            def __init__(self, events):
+                self.events = events
+
+            def stop(self):
+                self.events.append("socket")
+
+        daemon = RemoteDaemon("http://example.test", config=Config(audio=AudioConfig()))
+        events = []
+        daemon._control_server = FakeControlServer(events)
+        daemon._remove_pid = lambda: events.append("pid")
+
+        daemon._cleanup()
+
+        assert events == ["socket", "pid"]
 
     def test_toggle_client_targets_remote_client_socket(self, monkeypatch, tmp_path):
         from voiced import client

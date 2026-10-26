@@ -60,8 +60,8 @@ class RemoteDaemon:
         )
 
         self._state = ClientState.IDLE
+        self._running = False
         self._state_lock = threading.Lock()
-        self._shutdown_event = threading.Event()
 
         self._recorder: Recorder | None = None
         self._tray: TrayIcon | None = None
@@ -296,12 +296,12 @@ class RemoteDaemon:
             raise
         finally:
             self._cleanup()
-            if self._control_server is not None:
-                self._control_server.stop()
-                self._control_server = None
 
     def _cleanup(self) -> None:
-        """Clean up resources."""
+        """Stop local control before removing the client's PID file."""
+        if self._control_server is not None:
+            self._control_server.stop()
+            self._control_server = None
         logger.info("Cleaning up")
         self._running = False
 
