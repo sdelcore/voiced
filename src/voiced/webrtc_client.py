@@ -51,6 +51,11 @@ class LocalAudioSource(MediaStreamTrack):
         self._stream: sd.InputStream | None = None
         self._pts = 0
         self._running = False
+        self._input_level = 0.0
+
+    @property
+    def input_level(self) -> float:
+        return self._input_level
 
     def _audio_callback(
         self, indata: np.ndarray, frames: int, time_info: Any, status: sd.CallbackFlags
@@ -58,9 +63,9 @@ class LocalAudioSource(MediaStreamTrack):
         """Callback for sounddevice audio input."""
         if status:
             logger.warning(f"Audio input status: {status}")
-        # Convert to mono float32
         audio = indata[:, 0] if indata.ndim > 1 else indata.flatten()
         audio = audio.astype(np.float32)
+        self._input_level = min(float(np.sqrt(np.mean(np.square(indata)))), 1.0)
         self._queue.put(audio.copy())
 
     def start(self) -> None:
@@ -82,42 +87,38 @@ class LocalAudioSource(MediaStreamTrack):
 
     def stop(self) -> None:
         """Stop audio capture."""
-        if not self._running:
-            return
-
         self._running = False
+        self._input_level = 0.0
         if self._stream:
             self._stream.stop()
             self._stream.close()
+            while True:
+                try:
+                    self._queue.get_nowait()
+                except queue.Empty:
+                    break
             self._stream = None
         logger.info("Local audio capture stopped")
 
     async def recv(self) -> AudioFrame:
         """Generate audio frames for WebRTC."""
-        # Get audio from queue (blocking in thread pool)
         loop = asyncio.get_event_loop()
         try:
             audio = await loop.run_in_executor(None, self._queue.get, True, 0.1)
         except queue.Empty:
-            # Generate silence if no audio available
             audio = np.zeros(FRAME_SAMPLES, dtype=np.float32)
 
-        # Ensure correct frame size
         if len(audio) < FRAME_SAMPLES:
             audio = np.pad(audio, (0, FRAME_SAMPLES - len(audio)))
         elif len(audio) > FRAME_SAMPLES:
             audio = audio[:FRAME_SAMPLES]
 
-        # Convert to int16 for WebRTC
         audio_int16 = (audio * 32767).astype(np.int16)
-
-        # Create audio frame
         frame = AudioFrame(format="s16", layout="mono", samples=FRAME_SAMPLES)
         frame.sample_rate = WEBRTC_SAMPLE_RATE
         frame.pts = self._pts
         frame.planes[0].update(audio_int16.tobytes())
         self._pts += FRAME_SAMPLES
-
         return frame
 
 
@@ -166,15 +167,17 @@ class RemoteAudioSink:
         logger.info("Remote audio playback started")
 
     def stop(self) -> None:
-        """Stop audio playback."""
-        if not self._running:
-            return
-
+        """Stop audio playback and discard queued audio."""
         self._running = False
         if self._stream:
             self._stream.stop()
             self._stream.close()
             self._stream = None
+        while True:
+            try:
+                self._queue.get_nowait()
+            except queue.Empty:
+                break
         logger.info("Remote audio playback stopped")
 
     def push_audio(self, audio: np.ndarray) -> None:
@@ -225,6 +228,9 @@ class WebRTCClient:
         # Result futures for synchronous API
         self._stt_result: asyncio.Future | None = None
         self._tts_done: asyncio.Future | None = None
+        self._stt_active = False
+        self._stt_last_partial = ""
+        self._stt_partial_callback: Callable[[str], None] | None = None
 
     def set_callbacks(
         self,
@@ -241,67 +247,61 @@ class WebRTCClient:
         self._on_tts_finished = on_tts_finished
         self._on_error = on_error
 
+    @property
+    def input_level(self) -> float:
+        """Return the current microphone level."""
+        return self._local_audio.input_level if self._local_audio else 0.0
+
     async def connect(self) -> None:
         """Establish WebRTC connection to server."""
         if self._connected:
             return
 
-        self._pc = RTCPeerConnection()
-
-        # Create local audio track
-        self._local_audio = LocalAudioSource(device=self.config.input_device)
-        self._pc.addTrack(self._local_audio)
-
-        # Create data channel
-        self._data_channel = self._pc.createDataChannel("control")
-        self._data_channel_ready = asyncio.Event()
-
-        @self._data_channel.on("open")
-        def on_open():
-            logger.info("Data channel opened")
-            self._data_channel_ready.set()
-
-        @self._data_channel.on("message")
-        def on_message(message):
-            asyncio.create_task(self._handle_message(message))
-
-        # Handle incoming tracks (TTS audio)
-        self._remote_audio = RemoteAudioSink(device=self.config.output_device)
-
-        @self._pc.on("track")
-        def on_track(track: MediaStreamTrack):
-            logger.info(f"Received track: {track.kind}")
-            if track.kind == "audio":
-                asyncio.create_task(self._receive_remote_audio(track))
-
-        # Create offer
-        offer = await self._pc.createOffer()
-        await self._pc.setLocalDescription(offer)
-
-        # Wait for ICE gathering
-        await self._wait_for_ice_gathering()
-
-        # Send offer to server
-        answer_data = await self._send_offer(self._pc.localDescription.sdp)
-
-        # Set remote description
-        answer = RTCSessionDescription(sdp=answer_data["sdp"], type=answer_data["type"])
-        await self._pc.setRemoteDescription(answer)
-
-        self._session_id = answer_data.get("session_id")
-        self._connected = True
-
-        # Start audio
-        self._local_audio.start()
-        self._remote_audio.start()
-
-        # Wait for data channel to open (with timeout)
         try:
-            await asyncio.wait_for(self._data_channel_ready.wait(), timeout=10.0)
-        except asyncio.TimeoutError:
-            raise RuntimeError("Data channel failed to open")
+            self._pc = RTCPeerConnection()
+            self._local_audio = LocalAudioSource(device=self.config.input_device)
+            self._pc.addTrack(self._local_audio)
+            self._data_channel = self._pc.createDataChannel("control")
+            self._data_channel_ready = asyncio.Event()
 
-        logger.info(f"Connected to server, session: {self._session_id}")
+            @self._data_channel.on("open")
+            def on_open():
+                logger.info("Data channel opened")
+                self._data_channel_ready.set()
+
+            @self._data_channel.on("message")
+            def on_message(message):
+                asyncio.create_task(self._handle_message(message))
+
+            self._remote_audio = RemoteAudioSink(device=self.config.output_device)
+
+            @self._pc.on("track")
+            def on_track(track: MediaStreamTrack):
+                logger.info(f"Received track: {track.kind}")
+                if track.kind == "audio":
+                    asyncio.create_task(self._receive_remote_audio(track))
+
+            offer = await self._pc.createOffer()
+            await self._pc.setLocalDescription(offer)
+            await self._wait_for_ice_gathering()
+            answer_data = await self._send_offer(self._pc.localDescription.sdp)
+            answer = RTCSessionDescription(sdp=answer_data["sdp"], type=answer_data["type"])
+            await self._pc.setRemoteDescription(answer)
+            self._session_id = answer_data.get("session_id")
+            self._local_audio.start()
+            self._remote_audio.start()
+            try:
+                await asyncio.wait_for(self._data_channel_ready.wait(), timeout=10.0)
+            except asyncio.TimeoutError:
+                raise RuntimeError("Data channel failed to open")
+            self._connected = True
+            logger.info(f"Connected to server, session: {self._session_id}")
+        except BaseException:
+            try:
+                await self.disconnect()
+            except Exception:
+                logger.exception("Failed to clean up after WebRTC connection failure")
+            raise
 
     async def _wait_for_ice_gathering(self, timeout: float = 5.0) -> None:
         """Wait for ICE gathering to complete."""
@@ -363,31 +363,23 @@ class WebRTCClient:
 
             if msg_type == "stt_partial":
                 text = data.get("text", "")
-                if self._on_stt_partial:
-                    self._on_stt_partial(text)
+                if self._stt_active and text != self._stt_last_partial:
+                    self._stt_last_partial = text
+                    callback = self._stt_partial_callback or self._on_stt_partial
+                    if callback:
+                        callback(text)
 
-            elif msg_type == "stt_final":
+            elif msg_type in ("stt_final", "batch_result"):
                 result = STTResult(
                     text=data.get("text", ""),
                     segments=data.get("segments", []),
                     is_final=True,
                 )
+                self._stt_active = False
                 if self._on_stt_final:
                     self._on_stt_final(result)
                 if self._stt_result and not self._stt_result.done():
                     self._stt_result.set_result(result)
-
-            elif msg_type == "batch_result":
-                result = STTResult(
-                    text=data.get("text", ""),
-                    segments=data.get("segments", []),
-                    is_final=True,
-                )
-                if self._on_stt_final:
-                    self._on_stt_final(result)
-                if self._stt_result and not self._stt_result.done():
-                    self._stt_result.set_result(result)
-
             elif msg_type == "tts_started":
                 if self._on_tts_started:
                     self._on_tts_started()
@@ -404,12 +396,12 @@ class WebRTCClient:
                 logger.error(f"Server error: {code} - {message}")
                 if self._on_error:
                     self._on_error(code, message)
-                # Fail pending operations
-                error = Exception(f"{code}: {message}")
-                if self._stt_result and not self._stt_result.done():
-                    self._stt_result.set_exception(error)
-                if self._tts_done and not self._tts_done.done():
-                    self._tts_done.set_exception(error)
+                error = RuntimeError(f"{code}: {message}")
+                self._stt_active = False
+                self._stt_partial_callback = None
+                for future in (self._stt_result, self._tts_done):
+                    if future and not future.done():
+                        future.set_exception(error)
 
             elif msg_type == "stt_started":
                 logger.debug("STT recording started on server")
@@ -418,34 +410,60 @@ class WebRTCClient:
             logger.warning(f"Invalid JSON message: {message}")
 
     async def start_stt(self, language: str | None = None, identify_speakers: bool = False) -> None:
-        """Start STT recording."""
+        """Begin recording; partial callbacks are provisional, stop returns the stable final."""
         if not self._connected or not self._data_channel:
             raise RuntimeError("Not connected")
+        if self._stt_result and not self._stt_result.done():
+            raise RuntimeError("An STT operation is already active")
 
-        self._stt_result = asyncio.get_event_loop().create_future()
-
+        self._stt_result = asyncio.get_running_loop().create_future()
+        self._stt_active = True
+        self._stt_last_partial = ""
         message = {"type": "stt_start", "identify_speakers": identify_speakers}
         if language:
             message["language"] = language
 
-        self._data_channel.send(json.dumps(message))
+        try:
+            self._data_channel.send(json.dumps(message))
+        except Exception:
+            self._stt_active = False
+            self._stt_result.cancel()
+            raise
         logger.info("STT recording started")
 
+    async def start_stt_stream(
+        self,
+        on_partial: Callable[[str], None] | None = None,
+        language: str | None = None,
+        identify_speakers: bool = False,
+    ) -> None:
+        """Start live microphone STT and deliver provisional text as audio arrives."""
+        self._stt_partial_callback = on_partial
+        try:
+            await self.start_stt(language, identify_speakers)
+        except Exception:
+            self._stt_partial_callback = None
+            raise
+
     async def stop_stt(self) -> STTResult:
-        """Stop STT recording and get result."""
+        """Stop recording and await the stable final transcription."""
         if not self._connected or not self._data_channel:
             raise RuntimeError("Not connected")
+        if not self._stt_active or self._stt_result is None:
+            raise RuntimeError("STT recording is not active")
+        result = self._stt_result
+        try:
+            self._data_channel.send(json.dumps({"type": "stt_stop"}))
+        except Exception:
+            self._stt_active = False
+            self._stt_partial_callback = None
+            raise
+        logger.info("STT recording stopped, waiting for final result...")
+        result = await result
+        self._stt_partial_callback = None
+        return result
 
-        self._data_channel.send(json.dumps({"type": "stt_stop"}))
-        logger.info("STT recording stopped, waiting for result...")
-
-        if self._stt_result:
-            return await self._stt_result
-        return STTResult(text="", segments=[], is_final=True)
-
-    async def speak(
-        self, text: str, voice: str | None = None, speed: float | None = None
-    ) -> None:
+    async def speak(self, text: str, voice: str | None = None, speed: float | None = None) -> None:
         """Synthesize and play text via TTS."""
         if not self._connected or not self._data_channel:
             raise RuntimeError("Not connected")
@@ -503,26 +521,26 @@ class WebRTCClient:
 
     async def disconnect(self) -> None:
         """Disconnect from server."""
-        if not self._connected:
-            return
-
+        error = RuntimeError("Disconnected before operation completed")
+        self._stt_active = False
+        self._stt_partial_callback = None
+        for future in (self._stt_result, self._tts_done):
+            if future and not future.done():
+                future.set_exception(error)
         self._connected = False
 
         if self._local_audio:
             self._local_audio.stop()
             self._local_audio = None
-
         if self._remote_audio:
             self._remote_audio.stop()
             self._remote_audio = None
-
         if self._pc:
-            await self._pc.close()
-            self._pc = None
+            pc, self._pc = self._pc, None
+            await pc.close()
 
         self._session_id = None
         self._data_channel = None
-
         logger.info("Disconnected from server")
 
     @property
@@ -553,20 +571,22 @@ class SyncWebRTCClient:
 
     def connect(self) -> None:
         """Connect to server."""
-        # Start event loop thread
         self._thread = threading.Thread(target=self._run_loop, daemon=True)
         self._thread.start()
 
-        # Wait for loop to be ready
         while self._loop is None:
             import time
 
             time.sleep(0.01)
 
-        # Create client and connect
         self._client = WebRTCClient(self._config)
         future = asyncio.run_coroutine_threadsafe(self._client.connect(), self._loop)
-        future.result(timeout=30.0)
+        try:
+            future.result(timeout=30.0)
+        except BaseException:
+            future.cancel()
+            self.disconnect()
+            raise
 
     def start_stt(self, language: str | None = None, identify_speakers: bool = False) -> None:
         """Start STT recording."""
@@ -575,6 +595,21 @@ class SyncWebRTCClient:
 
         future = asyncio.run_coroutine_threadsafe(
             self._client.start_stt(language, identify_speakers),
+            self._loop,
+        )
+        future.result(timeout=5.0)
+
+    def start_stt_stream(
+        self,
+        on_partial: Callable[[str], None] | None = None,
+        language: str | None = None,
+        identify_speakers: bool = False,
+    ) -> None:
+        """Start live capture; callback receives provisional transcripts before stop."""
+        if not self._client or not self._loop:
+            raise RuntimeError("Not connected")
+        future = asyncio.run_coroutine_threadsafe(
+            self._client.start_stt_stream(on_partial, language, identify_speakers),
             self._loop,
         )
         future.result(timeout=5.0)

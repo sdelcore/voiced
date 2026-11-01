@@ -369,6 +369,57 @@ def stop() -> None:
         sys.exit(1)
 
 
+def _send_recording_command(command: str, label: str) -> None:
+    """Send a recording control command over the daemon's Unix socket."""
+    from voiced.client import send_command
+
+    try:
+        response = send_command(command)
+        if response.get("status") == "ok":
+            click.echo(response.get("message", label))
+        else:
+            click.echo(f"Error: {response.get('message', 'Unknown error')}", err=True)
+            raise click.exceptions.Exit(1)
+    except DaemonNotRunning:
+        click.echo("Daemon is not running. Start it with: voiced start", err=True)
+        raise click.exceptions.Exit(1)
+    except ClientError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.exceptions.Exit(1)
+
+
+@main.command("start-recording")
+def start_recording() -> None:
+    """Start recording (use on a push-to-talk key press)."""
+    _send_recording_command("start", "Recording started")
+
+
+@main.command("stop-recording")
+def stop_recording() -> None:
+    """Stop recording and transcribe (use on push-to-talk key release)."""
+    _send_recording_command("stop_recording", "Recording stopped")
+
+
+@main.command()
+def cancel() -> None:
+    """Cancel the current recording without transcribing it."""
+    _send_recording_command("cancel", "Recording cancelled")
+
+
+@main.command("copy-last")
+def copy_last() -> None:
+    """Copy the most recent transcription to the clipboard."""
+    _send_recording_command("copy_last", "Copied last transcription")
+
+
+@main.command()
+def desktop() -> None:
+    """Open the desktop recording window."""
+    from voiced.desktop import main as desktop_main
+
+    desktop_main()
+
+
 @main.command()
 def toggle() -> None:
     """Toggle recording on/off.

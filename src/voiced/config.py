@@ -19,6 +19,7 @@ class TranscriptionConfig:
     # Words the model habitually gets wrong, mapped to their fix.
     # Matched case-insensitively on word boundaries after transcription.
     replacements: dict[str, str] = field(default_factory=dict)
+    context_replacements: dict[str, dict[str, str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -164,10 +165,18 @@ def load_config() -> Config:
         config.unload_timeout_minutes = data["unload_timeout_minutes"]
 
     if "transcription" in data:
-        for key, value in data["transcription"].items():
-            if hasattr(config.transcription, key):
+        transcription_data = data["transcription"]
+        for key, value in transcription_data.items():
+            if key == "replacements" and isinstance(value, dict):
+                config.transcription.replacements = value
+            elif key == "context_replacements" and isinstance(value, dict):
+                config.transcription.context_replacements = {
+                    mode: replacements
+                    for mode, replacements in value.items()
+                    if isinstance(mode, str) and isinstance(replacements, dict)
+                }
+            elif hasattr(config.transcription, key):
                 setattr(config.transcription, key, value)
-
     if "audio" in data:
         for key, value in data["audio"].items():
             if hasattr(config.audio, key):
@@ -238,6 +247,12 @@ language = "en"          # advisory only; Parakeet TDT v3 auto-detects
 [transcription.replacements]
 # "cloud code" = "Claude Code"
 # "hyperland" = "Hyprland"
+
+# Per-context replacements override matching global replacements.
+# Select them through set_context_mode IPC; unconfigured modes are rejected.
+# Example: [transcription.context_replacements.work]
+# "issue tracker" = "Linear"
+
 
 [audio]
 sample_rate = 16000

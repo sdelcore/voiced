@@ -7,7 +7,10 @@ A voice daemon for Linux/Wayland providing both **Speech-to-Text (STT)** and **T
 ### STT (Speech-to-Text)
 - Hotkey toggle - bind `voiced toggle` to any key
 - Record-then-transcribe workflow
-- **Client-server mode** - run transcription on a remote GPU server
+- Push-to-talk controls: separate start/release commands for compositor bindings
+- Desktop recording window (`voiced desktop`)
+- Local and remote transcription modes
+- Optional screen annotation and meeting transcription workflows (see capabilities below)
 - System tray integration with modern icons
 - GPU acceleration with CPU fallback
 - NVIDIA Parakeet-TDT v3 backend (low WER, hallucination-resistant on silence)
@@ -92,6 +95,20 @@ Toggle recording (bind this to a hotkey):
 ```bash
 voiced toggle
 ```
+
+For push-to-talk bindings, call one command on key press and the other on
+release. These commands use the daemon's Unix socket; start the daemon first.
+```bash
+voiced start-recording   # key press: begin capture
+voiced stop-recording    # key release: stop and transcribe
+voiced cancel            # discard the current recording
+voiced copy-last         # copy the most recent transcript
+```
+
+Open the GTK desktop interface with `voiced desktop`. It is a local desktop
+UI and requires the GTK dependencies/display environment. The daemon may
+transcribe locally, or use a configured remote transcription service; in
+remote mode audio leaves this machine for that server.
 
 Check status:
 ```bash
@@ -225,6 +242,76 @@ voiced record -o transcript.txt       # Save to file
 voiced record --annotate              # With speaker diarization
 voiced record --annotate --num-speakers 2
 ```
+
+### Desktop CLI, History, Annotation, and Meetings
+
+Launch the GTK desktop companion with `voiced desktop`. It connects to the
+running local daemon for recording controls and status; install GTK 3/PyGObject
+and run it in a graphical session. It includes Start/Stop/Cancel, Copy last,
+microphone level and elapsed-time indicators, transcript/history views, a
+context selector, meeting capture, and screen annotation controls. Its config
+page edits the local configuration file; it does not start a separate daemon.
+
+The desktop can use the local daemon (which transcribes locally) or a separate
+remote client daemon (`voiced client --server URL`), which records on this
+machine and sends audio to the configured HTTP transcription server. These are
+distinct daemon choices; audio sent remotely leaves this machine. The desktop
+does not silently switch transcription services.
+
+For Hyprland push-to-talk, bind start and stop separately so the release event
+ends capture and starts transcription:
+
+```ini
+bind = SUPER, R, exec, voiced start-recording
+bindr = SUPER, R, exec, voiced stop-recording
+```
+
+`bindr` runs on key release. `voiced cancel` discards a recording; `voiced
+toggle` remains available for a single toggle binding.
+
+The interactive experimental WebRTC client (`voiced webrtc-client`, optionally
+with `--server URL`) streams bidirectional audio and prints partial/final STT
+results; its commands are `r` to record, `s` to stop, `t <text>` to send TTS,
+and `q` to quit. Treat streaming as provisional, not as the normal desktop
+record-then-transcribe path. It requires a WebRTC-enabled server and adds
+streaming/network overhead; the exact compute and bandwidth cost depends on
+the server, codec, and session, so no fixed cost or latency is promised.
+
+The context selector lists `default` and configured
+`[transcription.context_replacements.<mode>]` modes. These are exact text
+replacements applied during transcription, not prompts or model-training
+contexts. Configure global replacements under `[transcription.replacements]`
+and mode-specific replacements under a named table, for example:
+
+```toml
+[transcription.context_replacements.work]
+"issue tracker" = "Linear"
+```
+
+History is displayed in the desktop but is not persisted by default. The
+history store supports opt-in persistence, bounded to 200 entries, in
+`~/.cache/voiced/desktop-history.json`; the file is mode 0600. Treat persisted
+transcripts as sensitive local text. Clearing displayed history removes its
+entries from the desktop history store; daemon history is distinct. Activating
+a history row allows a local correction/replacement without changing the
+daemon's canonical transcript.
+
+Meeting capture is an explicit desktop action labeled “Record meeting (mic +
+system audio)”. It captures microphone and system-loopback audio as separate
+tracks; loopback uses a configured/native PulseAudio or PipeWire source. After
+stopping, each available track is transcribed separately and results are
+reported per source, with speaker segments when diarization is enabled. This
+is not an automatic meeting-app integration or always-on recording; selecting
+a remote backend sends the audio to that server.
+
+Screen annotation is also explicitly started with “Capture screen region +
+transcript”; it requires a Wayland session and `slurp`, `wf-recorder`, `ffmpeg`,
+GTK 3/PyGObject, and GtkLayerShell. Select the region when prompted, draw with
+the primary mouse button, then use Stop capture or Cancel capture. Successful
+exports are an MP4 screen recording, a text transcript of its audio, JSON
+drawing keyframes, and annotated PNG frames for completed strokes in the
+annotation output directory. Transcription follows the configured local/remote
+backend; canceling discards the capture.
 
 ### File Transcription
 

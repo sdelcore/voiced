@@ -112,6 +112,7 @@ class RecordingSession:
         self._state = SessionState.IDLE
         self._state_lock = threading.RLock()
         self._shutdown_flag = False
+        self._generation = 0
 
         self._recorder: Recorder | None = None
         self._worker: threading.Thread | None = None
@@ -133,6 +134,11 @@ class RecordingSession:
         with self._state_lock:
             return self._state
 
+    @property
+    def recorder(self) -> Recorder | None:
+        with self._state_lock:
+            return self._recorder
+
     def on_state_change(self, cb: StateChangeCallback) -> None:
         self._on_state_change_cbs.append(cb)
 
@@ -143,16 +149,47 @@ class RecordingSession:
         self._on_error_cbs.append(cb)
 
     def toggle(self) -> ToggleOutcome:
-        """Advance the state machine. Returns a ToggleOutcome describing what happened."""
+        """Advance the state machine or reject while transcription is active."""
         with self._state_lock:
             if self._shutdown_flag:
                 return ToggleOutcome.rejected(self._state, "session has been shut down")
-
             if self._state == SessionState.IDLE:
+                if self._worker is not None and self._worker.is_alive():
+                    return ToggleOutcome.rejected(self._state, "transcription in progress")
                 return self._start_recording_locked()
             if self._state == SessionState.RECORDING:
                 return self._stop_recording_locked()
             return ToggleOutcome.rejected(self._state, "transcription in progress")
+
+    def start(self) -> ToggleOutcome:
+        with self._state_lock:
+            if self._shutdown_flag or self._state != SessionState.IDLE:
+                return ToggleOutcome.rejected(self._state, "session is not idle")
+            if self._worker is not None and self._worker.is_alive():
+                return ToggleOutcome.rejected(self._state, "transcription in progress")
+            return self._start_recording_locked()
+
+    def stop(self) -> ToggleOutcome:
+        with self._state_lock:
+            if self._shutdown_flag or self._state != SessionState.RECORDING:
+                return ToggleOutcome.rejected(self._state, "not recording")
+            return self._stop_recording_locked()
+
+    def cancel(self) -> ToggleOutcome:
+        with self._state_lock:
+            if self._state != SessionState.RECORDING:
+                return ToggleOutcome.rejected(self._state, "not recording")
+            recorder, self._recorder = self._recorder, None
+            old = self._state
+            self._state = SessionState.IDLE
+            self._generation += 1
+            self._enqueue_state_change(old, self._state)
+        if recorder is not None and recorder.is_recording:
+            try:
+                recorder.stop()
+            except Exception as exc:
+                self._enqueue_error(exc)
+        return ToggleOutcome.stopped()
 
     def shutdown(self, transcribe_timeout: float = 30.0) -> None:
         """Stop accepting toggles. Cancel recording immediately; wait for in-flight
@@ -188,6 +225,8 @@ class RecordingSession:
     # ----- locked transitions -----
 
     def _start_recording_locked(self) -> ToggleOutcome:
+        if self._worker is not None and self._worker.is_alive():
+            return ToggleOutcome.rejected(self._state, "transcription in progress")
         try:
             self._recorder = Recorder(config=self._audio_config)
             self._recorder.start()
@@ -246,9 +285,10 @@ class RecordingSession:
         self._enqueue_state_change(old, self._state)
 
         started_at = datetime.now()
+        generation = self._generation
         self._worker = threading.Thread(
             target=self._transcribe,
-            args=(audio_data, started_at),
+            args=(audio_data, started_at, generation),
             daemon=True,
             name="RecordingSessionWorker",
         )
@@ -257,7 +297,7 @@ class RecordingSession:
 
     # ----- worker thread -----
 
-    def _transcribe(self, audio_data: np.ndarray, started_at: datetime) -> None:
+    def _transcribe(self, audio_data: np.ndarray, started_at: datetime, generation: int) -> None:
         try:
             text = self._transcriber.transcribe_audio(
                 audio_data,
@@ -269,17 +309,22 @@ class RecordingSession:
                 duration=duration,
                 started_at=started_at,
             )
-            self._enqueue_result(result)
+            with self._state_lock:
+                if generation == self._generation:
+                    self._enqueue_result(result)
         except Exception as e:
             logger.exception("Transcription failed")
-            self._enqueue_error(e)
+            with self._state_lock:
+                if generation == self._generation:
+                    self._enqueue_error(e)
         finally:
             with self._state_lock:
-                old = self._state
-                self._state = SessionState.IDLE
+                if generation == self._generation:
+                    old = self._state
+                    self._state = SessionState.IDLE
+                    if old != SessionState.IDLE:
+                        self._enqueue_state_change(old, self._state)
                 self._worker = None
-                if old != SessionState.IDLE:
-                    self._enqueue_state_change(old, self._state)
 
     # ----- dispatch thread -----
 

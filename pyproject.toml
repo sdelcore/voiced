@@ -51,6 +51,7 @@ dependencies = [
     "dasbus>=1.7",
     "Pillow>=10.0.0",
     # PyGObject provided by nix pythonEnv (avoid pycairo rebuild)
+    # GTK, capture, and audio backend tools are system packages, not Python dependencies.
     # Speaker identification
     "scikit-learn>=1.0.0",
 ]
