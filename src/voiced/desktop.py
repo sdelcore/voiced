@@ -11,7 +11,13 @@ import time
 from typing import Any
 
 from voiced.client import ClientError, DaemonNotRunning, send_command
-from voiced.config import get_cache_dir, get_config_path, get_server_url, load_config
+from voiced.config import (
+    get_cache_dir,
+    get_client_socket_path,
+    get_config_path,
+    get_server_url,
+    load_config,
+)
 from voiced.desktop_history import TranscriptHistory
 
 POLL_INTERVAL_MS = 1000
@@ -79,8 +85,8 @@ def _gtk():
 class DesktopWindow:
     """GTK companion backed by daemon IPC, with capture actions in local threads."""
 
-    def __init__(self, socket_path=None, *, persist_history: bool = False):
-        self.socket_path = socket_path
+    def __init__(self, socket_path=None, *, client: bool = False, persist_history: bool = False):
+        self.socket_path = socket_path or (get_client_socket_path() if client else None)
         self._Gtk, self._GLib, self._layer_shell, self._Gdk = _gtk()
         self._last_status: dict[str, Any] = {}
         self._busy = False
@@ -793,6 +799,6 @@ class DesktopWindow:
         self._Gtk.main()
 
 
-def main():
+def main(*, client: bool = False):
     """Launch the GTK desktop companion."""
-    DesktopWindow().run()
+    DesktopWindow(client=client).run()

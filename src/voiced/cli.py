@@ -350,38 +350,54 @@ def webrtc_client_cmd(ctx: click.Context, server_url: str | None, timeout: float
 
 
 @main.command()
-def stop() -> None:
-    """Stop the voiced daemon."""
+@click.option("--client", "remote_client", is_flag=True, help="Stop the local remote client")
+def stop(remote_client: bool) -> None:
+    """Stop the local daemon, or the remote client with ``--client``."""
     from voiced import client
 
     try:
-        response = client.stop_daemon()
+        if remote_client:
+            from voiced.config import get_client_socket_path
+
+            response = client.send_command("stop", socket_path=get_client_socket_path())
+        else:
+            response = client.stop_daemon()
         if response.get("status") == "ok":
-            click.echo("Daemon stopping")
+            target = "Remote client" if remote_client else "Daemon"
+            click.echo(f"{target} stopping")
         else:
             click.echo(f"Error: {response.get('message', 'Unknown error')}", err=True)
             sys.exit(1)
     except DaemonNotRunning:
-        click.echo("Daemon is not running", err=True)
+        target = "remote client" if remote_client else "daemon"
+        command = "voiced client" if remote_client else "voiced start"
+        click.echo(f"{target.capitalize()} is not running. Start it with: {command}", err=True)
         sys.exit(1)
     except ClientError as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
 
 
-def _send_recording_command(command: str, label: str) -> None:
-    """Send a recording control command over the daemon's Unix socket."""
+def _send_recording_command(command: str, label: str, remote_client: bool = False) -> None:
+    """Send a recording control command over the selected Unix socket."""
     from voiced.client import send_command
 
     try:
-        response = send_command(command)
+        socket_path = None
+        if remote_client:
+            from voiced.config import get_client_socket_path
+
+            socket_path = get_client_socket_path()
+        response = send_command(command, socket_path=socket_path)
         if response.get("status") == "ok":
             click.echo(response.get("message", label))
         else:
             click.echo(f"Error: {response.get('message', 'Unknown error')}", err=True)
             raise click.exceptions.Exit(1)
     except DaemonNotRunning:
-        click.echo("Daemon is not running. Start it with: voiced start", err=True)
+        target = "remote client" if remote_client else "daemon"
+        command = "voiced client" if remote_client else "voiced start"
+        click.echo(f"{target.capitalize()} is not running. Start it with: {command}", err=True)
         raise click.exceptions.Exit(1)
     except ClientError as e:
         click.echo(f"Error: {e}", err=True)
@@ -389,49 +405,69 @@ def _send_recording_command(command: str, label: str) -> None:
 
 
 @main.command("start-recording")
-def start_recording() -> None:
+@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
+def start_recording(remote_client: bool) -> None:
     """Start recording (use on a push-to-talk key press)."""
-    _send_recording_command("start", "Recording started")
+    _send_recording_command("start", "Recording started", remote_client)
 
 
 @main.command("stop-recording")
-def stop_recording() -> None:
+@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
+def stop_recording(remote_client: bool) -> None:
     """Stop recording and transcribe (use on push-to-talk key release)."""
-    _send_recording_command("stop_recording", "Recording stopped")
+    _send_recording_command("stop_recording", "Recording stopped", remote_client)
 
 
 @main.command()
-def cancel() -> None:
+@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
+def cancel(remote_client: bool) -> None:
     """Cancel the current recording without transcribing it."""
-    _send_recording_command("cancel", "Recording cancelled")
+    _send_recording_command("cancel", "Recording cancelled", remote_client)
 
 
 @main.command("copy-last")
-def copy_last() -> None:
+@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
+def copy_last(remote_client: bool) -> None:
     """Copy the most recent transcription to the clipboard."""
-    _send_recording_command("copy_last", "Copied last transcription")
+    _send_recording_command("copy_last", "Copied last transcription", remote_client)
 
 
 @main.command()
-def desktop() -> None:
+@click.option("--client", "remote_client", is_flag=True, help="Connect desktop to remote client")
+def desktop(remote_client: bool) -> None:
     """Open the desktop recording window."""
-    from voiced.desktop import main as desktop_main
+    from voiced.desktop import DesktopWindow
 
-    desktop_main()
+    DesktopWindow(client=remote_client).run()
 
 
 @main.command()
-def toggle() -> None:
-    """Toggle recording on/off.
+@click.option(
+    "--client",
+    "remote_client",
+    is_flag=True,
+    help="Toggle the local remote client instead of the local daemon",
+)
+def toggle(remote_client: bool) -> None:
+    """Toggle recording on the local daemon or remote client.
 
-    This is the command to bind to a hotkey in Hyprland:
+    Bind the default command when using the local daemon:
 
         bind = SUPER, R, exec, voiced toggle
+
+    Bind the remote client when using ``voiced client``:
+
+        bind = SUPER, R, exec, voiced toggle --client
     """
     from voiced import client
 
     try:
-        response = client.toggle_recording()
+        if remote_client:
+            from voiced.config import get_client_socket_path
+
+            response = client.send_command("toggle", socket_path=get_client_socket_path())
+        else:
+            response = client.toggle_recording()
         if response.get("status") == "ok":
             state = response.get("state", "unknown")
             click.echo(f"State: {state}")
@@ -441,7 +477,9 @@ def toggle() -> None:
             click.echo(f"Error: {response.get('message', 'Unknown error')}", err=True)
             sys.exit(1)
     except DaemonNotRunning:
-        click.echo("Daemon is not running. Start it with: voiced start", err=True)
+        target = "remote client" if remote_client else "daemon"
+        command = "voiced client" if remote_client else "voiced start"
+        click.echo(f"{target.capitalize()} is not running. Start it with: {command}", err=True)
         sys.exit(1)
     except ClientError as e:
         click.echo(f"Error: {e}", err=True)
@@ -449,18 +487,28 @@ def toggle() -> None:
 
 
 @main.command()
-def status() -> None:
-    """Show daemon status."""
+@click.option("--client", "remote_client", is_flag=True, help="Show local remote-client status")
+def status(remote_client: bool) -> None:
+    """Show daemon status, or remote-client status with ``--client``."""
     from voiced import client
 
     try:
-        response = client.get_status()
-        click.echo("Status: running")
-        click.echo(f"State: {response.get('state', 'unknown')}")
-        click.echo(f"Model: {response.get('model', 'unknown')}")
-        click.echo(f"Device: {response.get('device', 'unknown')}")
+        if remote_client:
+            from voiced.config import get_client_socket_path
+
+            response = client.send_command("status", socket_path=get_client_socket_path())
+            click.echo("Status: remote client running")
+            click.echo(f"State: {response.get('state', 'unknown')}")
+            click.echo(f"Server: {response.get('server', 'unknown')}")
+        else:
+            response = client.get_status()
+            click.echo("Status: running")
+            click.echo(f"State: {response.get('state', 'unknown')}")
+            click.echo(f"Model: {response.get('model', 'unknown')}")
+            click.echo(f"Device: {response.get('device', 'unknown')}")
     except DaemonNotRunning:
-        click.echo("Status: not running")
+        target = "remote client" if remote_client else "daemon"
+        click.echo(f"Status: {target} not running", err=True)
         sys.exit(1)
     except ClientError as e:
         click.echo(f"Status: error ({e})", err=True)

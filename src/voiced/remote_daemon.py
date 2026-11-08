@@ -16,7 +16,7 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from voiced import audio
-from voiced.config import Config, get_cache_dir, load_config
+from voiced.config import Config, get_cache_dir, get_client_socket_path, load_config
 from voiced.injector import inject_to_clipboard
 from voiced.server import Server
 from voiced.tray import TrayIcon, TrayState
@@ -63,10 +63,11 @@ class RemoteDaemon:
 
         self._state = ClientState.IDLE
         self._running = False
+        self._state_lock = threading.Lock()
         self._shutdown_event = threading.Event()
         self._lock = threading.RLock()
         self._tray: TrayIcon | None = None
-        self._server: Server | None = None
+        self._control_server: Server | None = None
         self._history: deque[dict] = deque(maxlen=10)
         self._next_history_id = 1
         self._last_error: str | None = None
@@ -363,6 +364,19 @@ class RemoteDaemon:
         }
         self._tray.set_state(state_map.get(self._state, TrayState.IDLE))
 
+    def _handle_client_status(self, _args: dict) -> dict:
+        """Report the local remote-client state and inference endpoint."""
+        return {**self._handle_status(), "server": self.server_url}
+
+    def _handle_client_stop(self, _args: dict) -> dict:
+        """Request shutdown of the local remote client daemon."""
+        self._shutdown_event.set()
+        return {"status": "ok"}
+
+    def _handle_client_toggle(self, _args: dict) -> dict:
+        """Handle a toggle command from the local CLI socket."""
+        return self._handle_toggle()
+
     def _on_tray_toggle(self) -> None:
         """Handle tray icon toggle click."""
         self._handle_toggle()
@@ -411,18 +425,20 @@ class RemoteDaemon:
         self._write_pid()
 
         try:
-            self._server = Server()
-            self._server.register_handler("toggle", self._handle_toggle)
-            self._server.register_handler("start", self._handle_start_recording)
-            self._server.register_handler("stop_recording", self._handle_stop_recording)
-            self._server.register_handler("cancel", self._handle_cancel)
-            self._server.register_handler("status", self._handle_status)
-            self._server.register_handler("history", self._handle_history)
-            self._server.register_handler("copy_last", self._handle_copy_last)
-            self._server.register_handler("set_context_mode", self._handle_set_context_mode)
-            self._server.register_handler("update_replacements", self._handle_update_replacements)
-            self._server.register_handler("stop", self._handle_shutdown)
-            self._server.start()
+            self._control_server = Server(get_client_socket_path())
+            self._control_server.register_handler("toggle", self._handle_toggle)
+            self._control_server.register_handler("start", self._handle_start_recording)
+            self._control_server.register_handler("stop_recording", self._handle_stop_recording)
+            self._control_server.register_handler("cancel", self._handle_cancel)
+            self._control_server.register_handler("status", self._handle_client_status)
+            self._control_server.register_handler("history", self._handle_history)
+            self._control_server.register_handler("copy_last", self._handle_copy_last)
+            self._control_server.register_handler("set_context_mode", self._handle_set_context_mode)
+            self._control_server.register_handler(
+                "update_replacements", self._handle_update_replacements
+            )
+            self._control_server.register_handler("stop", self._handle_shutdown)
+            self._control_server.start()
             self._tray = TrayIcon(
                 on_toggle=self._on_tray_toggle,
                 on_quit=self._on_tray_quit,
@@ -435,15 +451,14 @@ class RemoteDaemon:
 
             while not self._shutdown_event.is_set():
                 self._shutdown_event.wait(timeout=1.0)
-
-        except Exception:
-            logger.exception("Remote client error")
-            raise
         finally:
             self._cleanup()
 
     def _cleanup(self) -> None:
-        """Clean up resources."""
+        """Stop local control before removing the client's PID file."""
+        if self._control_server is not None:
+            self._control_server.stop()
+            self._control_server = None
         logger.info("Cleaning up")
         self._running = False
         worker = self._worker
@@ -457,9 +472,6 @@ class RemoteDaemon:
         if self._tray is not None:
             self._tray.stop()
             self._tray = None
-        if self._server is not None:
-            self._server.stop()
-            self._server = None
         self._remove_pid()
         logger.info("Remote client stopped")
 

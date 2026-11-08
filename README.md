@@ -181,7 +181,15 @@ voiced client -d                  # Run in background
 VOICED_SERVER_URL=http://server:8765 voiced client
 ```
 
-The client records audio locally, sends it to the server for transcription, and copies the result to clipboard.
+The client records audio locally, sends it to the server for transcription, and copies the result to clipboard. Its control commands use the explicit `--client` target:
+
+```bash
+voiced toggle --client
+voiced status --client
+voiced stop --client
+```
+
+The default commands (`voiced toggle`, `voiced status`, and `voiced stop`) still target the local full daemon. Client commands use a separate local Unix socket; the configured server URL is only for inference. If the selected process is not running, the command reports that target as unavailable rather than falling back to the other process.
 
 **Test with curl:**
 ```bash
@@ -254,9 +262,10 @@ page edits the local configuration file; it does not start a separate daemon.
 
 The desktop can use the local daemon (which transcribes locally) or a separate
 remote client daemon (`voiced client --server URL`), which records on this
-machine and sends audio to the configured HTTP transcription server. These are
-distinct daemon choices; audio sent remotely leaves this machine. The desktop
-does not silently switch transcription services.
+machine and sends audio to the configured HTTP transcription server. Use
+`voiced desktop --client` for the remote client, and add `--client` to the
+recording control commands to target it. Audio sent remotely leaves this machine;
+the desktop does not silently switch transcription services.
 
 For Hyprland push-to-talk, bind start and stop separately so the release event
 ends capture and starts transcription:
