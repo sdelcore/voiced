@@ -25,6 +25,14 @@
           gobject-introspection.dev
           cairo
           cairo.dev
+          gtk3
+          gtk3.dev
+          gtk-layer-shell
+          gtk-layer-shell.dev
+          slurp
+          wf-recorder
+          pulseaudio
+          pipewire
           # X11/XCB deps for pycairo build
           xorg.libxcb
           xorg.libxcb.dev
@@ -75,7 +83,7 @@
           SOURCE_DIR="${voicedSrc}"
 
           export LD_LIBRARY_PATH="${pkgs.lib.makeLibraryPath runtimeDeps}:''${LD_LIBRARY_PATH:-}"
-          export GI_TYPELIB_PATH="${pkgs.glib.out}/lib/girepository-1.0:${pkgs.gobject-introspection.out}/lib/girepository-1.0:''${GI_TYPELIB_PATH:-}"
+          export GI_TYPELIB_PATH="${pkgs.glib.out}/lib/girepository-1.0:${pkgs.gobject-introspection.out}/lib/girepository-1.0:${pkgs.gtk3}/lib/girepository-1.0:${pkgs.gtk-layer-shell}/lib/girepository-1.0:${pkgs.pango.out}/lib/girepository-1.0:${pkgs.gdk-pixbuf}/lib/girepository-1.0:${pkgs.atk}/lib/girepository-1.0:${pkgs.harfbuzz}/lib/girepository-1.0:''${GI_TYPELIB_PATH:-}"
           # Add pythonEnv site-packages to PYTHONPATH so gi/pycairo are available
           export PYTHONPATH="${pythonEnv}/${pythonEnv.sitePackages}:''${PYTHONPATH:-}"
 
@@ -153,6 +161,12 @@
             glib
             gobject-introspection
             cairo
+            gtk3
+            gtk-layer-shell
+            slurp
+            wf-recorder
+            pulseaudio
+            pipewire
             wtype
             wl-clipboard
             espeak-ng
@@ -171,7 +185,7 @@
               echo "CUDA: enabled"
             fi
 
-            export GI_TYPELIB_PATH="${pkgs.glib.out}/lib/girepository-1.0:${pkgs.gobject-introspection.out}/lib/girepository-1.0:$GI_TYPELIB_PATH"
+            export GI_TYPELIB_PATH="${pkgs.glib.out}/lib/girepository-1.0:${pkgs.gobject-introspection.out}/lib/girepository-1.0:${pkgs.gtk3}/lib/girepository-1.0:${pkgs.gtk-layer-shell}/lib/girepository-1.0:${pkgs.pango.out}/lib/girepository-1.0:${pkgs.gdk-pixbuf}/lib/girepository-1.0:${pkgs.atk}/lib/girepository-1.0:${pkgs.harfbuzz}/lib/girepository-1.0:$GI_TYPELIB_PATH"
 
             if [ ! -d .venv ] || [ pyproject.toml -nt .venv ]; then
               echo "Syncing dependencies with uv..."

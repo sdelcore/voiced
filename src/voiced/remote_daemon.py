@@ -9,16 +9,15 @@ import os
 import signal
 import sys
 import threading
+from collections import deque
+from datetime import datetime
 from enum import Enum
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
-import numpy as np
-
 from voiced import audio
 from voiced.config import Config, get_cache_dir, get_client_socket_path, load_config
 from voiced.injector import inject_to_clipboard
-from voiced.recorder import Recorder
 from voiced.server import Server
 from voiced.tray import TrayIcon, TrayState
 from voiced.webrtc_client import SyncWebRTCClient, WebRTCClientConfig
@@ -57,18 +56,29 @@ class RemoteDaemon:
         self._webrtc_config = WebRTCClientConfig(
             server_url=server_url,
             timeout=effective_timeout,
+            input_device=None
+            if self.config.audio.device == "default"
+            else self.config.audio.device,
         )
 
         self._state = ClientState.IDLE
         self._running = False
         self._state_lock = threading.Lock()
         self._shutdown_event = threading.Event()
-
-        self._recorder: Recorder | None = None
+        self._lock = threading.RLock()
         self._tray: TrayIcon | None = None
         self._control_server: Server | None = None
-
+        self._history: deque[dict] = deque(maxlen=10)
+        self._next_history_id = 1
+        self._last_error: str | None = None
+        self._cancel_generation = 0
+        self._partial_text = ""
+        self._context_mode = "default"
+        self._recording_mode = "default"
+        self._input_level = 0.0
         self._pid_path = get_cache_dir() / "client.pid"
+        self._worker: threading.Thread | None = None
+        self._stream_client: SyncWebRTCClient | None = None
 
     @property
     def state(self) -> ClientState:
@@ -96,104 +106,250 @@ class RemoteDaemon:
             except Exception as e:
                 logger.warning(f"Failed to remove PID file: {e}")
 
-    def _handle_toggle(self) -> dict:
-        """Serialize tray and hotkey toggles against recording state changes."""
-        with self._state_lock:
+    def _handle_toggle(self, args: dict | None = None) -> dict:
+        with self._lock:
             if self._state == ClientState.IDLE:
+                if self._worker is not None and self._worker.is_alive():
+                    return self._result("rejected", "transcription in progress")
                 return self._start_recording()
             if self._state == ClientState.RECORDING:
                 return self._stop_and_send()
             return {
-                "status": "busy",
-                "message": f"Client is busy ({self._state.value})",
+                "status": "rejected",
+                "state": "transcribing",
+                "reason": "transcription in progress",
             }
 
-    def _start_recording(self) -> dict:
-        """Start recording audio."""
-        if self._recorder is not None and self._recorder.is_recording:
-            return {"status": "error", "message": "Already recording"}
+    def _result(self, status: str = "ok", message: str | None = None) -> dict:
+        result = {
+            "status": status,
+            "state": "transcribing" if self._state == ClientState.SENDING else self._state.value,
+        }
+        if message:
+            result["message"] = message
+        return result
 
-        self._state = ClientState.RECORDING
-        self._update_tray_state()
+    def _handle_start_recording(self, args: dict | None = None) -> dict:
+        with self._lock:
+            if self._state != ClientState.IDLE or (
+                self._worker is not None and self._worker.is_alive()
+            ):
+                return self._result("rejected", "not idle or transcription in progress")
+            return self._start_recording()
 
-        self._recorder = Recorder(config=self.config.audio)
-        self._recorder.start()
+    def _handle_stop_recording(self, args: dict | None = None) -> dict:
+        with self._lock:
+            if self._state != ClientState.RECORDING:
+                return self._result("rejected", "not recording")
+            return self._stop_and_send()
 
-        if self.config.audio.beep_enabled:
-            threading.Thread(target=audio.beep_start, daemon=True).start()
-
-        logger.info("Recording started")
-        return {"status": "ok", "state": "recording"}
-
-    def _stop_and_send(self) -> dict:
-        """Stop recording and send to server."""
-        if self._recorder is None or not self._recorder.is_recording:
-            return {"status": "error", "message": "Not recording"}
-
-        if self.config.audio.beep_enabled:
-            audio.beep_stop()
-
-        audio_data = self._recorder.stop()
-
-        self._state = ClientState.SENDING
-        self._update_tray_state()
-
-        if len(audio_data) == 0:
+    def _handle_cancel(self, args: dict | None = None) -> dict:
+        with self._lock:
+            if self._state not in (ClientState.RECORDING, ClientState.SENDING):
+                return self._result("rejected", "not recording")
+            self._cancel_generation += 1
+            client = self._stream_client
+            self._stream_client = None
             self._state = ClientState.IDLE
-            self._update_tray_state()
-            return {"status": "error", "message": "No audio recorded"}
+            self._partial_text = ""
+        if client is not None:
+            client.disconnect()
+        self._update_tray_state()
+        return self._result()
 
-        threading.Thread(
-            target=self._send_and_inject,
-            args=(audio_data,),
-            daemon=True,
-        ).start()
+    def _serialize_history(self) -> list[dict]:
+        return list(self._history)
 
-        return {"status": "ok", "state": "sending"}
+    def _handle_history(self, args: dict | None = None) -> dict:
+        with self._lock:
+            return {"status": "ok", "history": self._serialize_history()}
 
-    def _send_and_inject(self, audio_data: np.ndarray) -> None:
-        """Send audio to server via WebRTC and inject result to clipboard."""
+    def _handle_copy_last(self, args: dict | None = None) -> dict:
+        with self._lock:
+            if not self._history:
+                return {"status": "error", "message": "no transcript available"}
+            text = self._history[0]["text"]
+        success = inject_to_clipboard(text)
+        return {"status": "ok" if success else "error", "text": text}
+
+    def _handle_status(self, args: dict | None = None) -> dict:
+        with self._lock:
+            history = self._serialize_history()
+            input_level = (
+                self._stream_client.input_level if self._stream_client is not None else 0.0
+            )
+            return {
+                "status": "ok",
+                "state": "transcribing"
+                if self._state == ClientState.SENDING
+                else self._state.value,
+                "transcribing": self._state == ClientState.SENDING,
+                "history_count": len(history),
+                "history": history,
+                "last_transcript": history[0]["text"] if history else None,
+                "error": self._last_error,
+                "mode": "remote",
+                "model": None,
+                "device": self.config.transcription.device,
+                "partial_text": self._partial_text,
+                "input_level": input_level,
+                "context_mode": self._context_mode,
+            }
+
+    def _handle_set_context_mode(self, args: dict | None = None) -> dict:
+        mode = (args or {}).get("mode")
+        if not isinstance(mode, str) or not mode:
+            return {"status": "error", "message": "mode must be a non-empty string"}
+        with self._lock:
+            configured = self.config.transcription.context_replacements
+            if mode != "default" and mode not in configured:
+                return {"status": "error", "message": f"unknown context mode: {mode}"}
+            self._context_mode = mode
+            return {"status": "ok", "context_mode": mode}
+
+    def _fix_context(self, text: str, mode: str) -> str:
+        import re
+
+        with self._lock:
+            replacements = dict(self.config.transcription.replacements)
+            replacements.update(self.config.transcription.context_replacements.get(mode, {}))
+        for wrong, right in replacements.items():
+            text = re.sub(rf"\b{re.escape(wrong)}\b", lambda _: right, text, flags=re.IGNORECASE)
+        return text
+
+    def _handle_update_replacements(self, args: dict | None = None) -> dict:
+        args = args or {}
+        replacements = args.get("replacements")
+        context_replacements = args.get(
+            "context_replacements", self.config.transcription.context_replacements
+        )
+        if not self._valid_replacement_map(replacements) or not self._valid_context_replacements(
+            context_replacements
+        ):
+            return {"status": "error", "message": "invalid replacement mappings"}
+        with self._lock:
+            if self._context_mode != "default" and self._context_mode not in context_replacements:
+                return {"status": "error", "message": f"unknown context mode: {self._context_mode}"}
+            self.config.transcription.replacements = dict(replacements)
+            self.config.transcription.context_replacements = {
+                mode: dict(mapping) for mode, mapping in context_replacements.items()
+            }
+            return {"status": "ok", "context_mode": self._context_mode}
+
+    @staticmethod
+    def _valid_replacement_map(mapping) -> bool:
+        return isinstance(mapping, dict) and all(
+            isinstance(key, str) and isinstance(value, str) for key, value in mapping.items()
+        )
+
+    @classmethod
+    def _valid_context_replacements(cls, mapping) -> bool:
+        return isinstance(mapping, dict) and all(
+            isinstance(mode, str) and cls._valid_replacement_map(replacements)
+            for mode, replacements in mapping.items()
+        )
+
+    def _handle_shutdown(self, args: dict | None = None) -> dict:
+        self._shutdown_event.set()
+        return {"status": "ok", "message": "Daemon stopping"}
+
+    def _start_recording(self) -> dict:
+        if self._state != ClientState.IDLE:
+            return self._result("rejected", "not idle")
         client = SyncWebRTCClient(self._webrtc_config)
         try:
-            logger.info("Connecting to server via WebRTC...")
             client.connect()
+            with self._lock:
+                mode = self._context_mode
 
-            result = client.batch_transcribe(
-                audio_data,
-                sample_rate=self.config.audio.sample_rate,
+            def on_partial(text: str) -> None:
+                with self._lock:
+                    if self._state == ClientState.RECORDING:
+                        self._partial_text = self._fix_context(text, mode)
+
+            client.start_stt_stream(
+                on_partial=on_partial,
                 language=self.config.transcription.language,
             )
+        except Exception as exc:
+            client.disconnect()
+            self._last_error = str(exc)
+            return self._result("error", self._last_error)
+        self._stream_client = client
+        self._recording_mode = mode
+        self._state = ClientState.RECORDING
+        if self.config.audio.beep_enabled:
+            threading.Thread(target=audio.beep_start, daemon=True).start()
+        return self._result()
 
-            text = result.text if result else ""
-
-            if text:
-                logger.info(f"Transcribed: {text[:100]}...")
-                success = inject_to_clipboard(text)
-
-                if success and self.config.audio.beep_enabled:
-                    audio.beep_success()
-                elif not success and self.config.audio.beep_enabled:
-                    audio.beep_error()
-            else:
-                logger.warning("No text transcribed")
-                if self.config.audio.beep_enabled:
-                    audio.beep_error()
-
-        except TimeoutError:
-            logger.error("WebRTC connection timeout")
+    def _stop_and_send(self) -> dict:
+        if self._stream_client is None:
+            return self._result("error", "Not recording")
+        try:
             if self.config.audio.beep_enabled:
-                audio.beep_error()
-        except RuntimeError as e:
-            logger.error(f"WebRTC error: {e}")
-            if self.config.audio.beep_enabled:
-                audio.beep_error()
-        except Exception:
-            logger.exception("Unexpected error during transcription")
-            if self.config.audio.beep_enabled:
-                audio.beep_error()
+                audio.beep_stop()
+        except Exception as exc:
+            self._last_error = str(exc)
+            self._state = ClientState.IDLE
+            client, self._stream_client = self._stream_client, None
+            if client is not None:
+                client.disconnect()
+            return self._result("error", self._last_error)
+        self._state = ClientState.SENDING
+        generation = self._cancel_generation
+        self._partial_text = ""
+        self._worker = threading.Thread(
+            target=self._send_and_inject,
+            args=(generation,),
+            daemon=True,
+            name="RemoteTranscriptionWorker",
+        )
+        self._worker.start()
+        self._update_tray_state()
+        return self._result()
+
+    def _send_and_inject(self, generation: int) -> None:
+        """Wait for the stable final transcript and deliver it."""
+        with self._lock:
+            client = self._stream_client
+            mode = self._recording_mode
+        if client is None:
+            return
+        try:
+            result = client.stop_stt()
+            text = self._fix_context(result.text if result else "", mode)
+            with self._lock:
+                if generation != self._cancel_generation:
+                    return
+                if text:
+                    entry = {
+                        "id": self._next_history_id,
+                        "text": text,
+                        "timestamp": datetime.now().isoformat(),
+                        "preview": (text[:50] + ("..." if len(text) > 50 else "")).replace(
+                            "\\n", " "
+                        ),
+                    }
+                    self._history.appendleft(entry)
+                    self._next_history_id += 1
+                    self._last_error = None
+                    self._partial_text = ""
+                    inject_to_clipboard(text)
+                else:
+                    self._last_error = "No text transcribed"
+        except Exception as exc:
+            with self._lock:
+                if generation == self._cancel_generation:
+                    self._last_error = str(exc)
+            logger.exception("Remote transcription failed")
         finally:
             client.disconnect()
-            self._state = ClientState.IDLE
+            with self._lock:
+                if self._stream_client is client:
+                    self._stream_client = None
+                self._worker = None
+                self._state = ClientState.IDLE
+                self._partial_text = ""
             self._update_tray_state()
 
     def _update_tray_state(self) -> None:
@@ -210,11 +366,7 @@ class RemoteDaemon:
 
     def _handle_client_status(self, _args: dict) -> dict:
         """Report the local remote-client state and inference endpoint."""
-        return {
-            "status": "ok",
-            "state": self._state.value,
-            "server": self.server_url,
-        }
+        return {**self._handle_status(), "server": self.server_url}
 
     def _handle_client_stop(self, _args: dict) -> dict:
         """Request shutdown of the local remote client daemon."""
@@ -274,11 +426,19 @@ class RemoteDaemon:
 
         try:
             self._control_server = Server(get_client_socket_path())
-            self._control_server.register_handler("toggle", self._handle_client_toggle)
+            self._control_server.register_handler("toggle", self._handle_toggle)
+            self._control_server.register_handler("start", self._handle_start_recording)
+            self._control_server.register_handler("stop_recording", self._handle_stop_recording)
+            self._control_server.register_handler("cancel", self._handle_cancel)
             self._control_server.register_handler("status", self._handle_client_status)
-            self._control_server.register_handler("stop", self._handle_client_stop)
+            self._control_server.register_handler("history", self._handle_history)
+            self._control_server.register_handler("copy_last", self._handle_copy_last)
+            self._control_server.register_handler("set_context_mode", self._handle_set_context_mode)
+            self._control_server.register_handler(
+                "update_replacements", self._handle_update_replacements
+            )
+            self._control_server.register_handler("stop", self._handle_shutdown)
             self._control_server.start()
-
             self._tray = TrayIcon(
                 on_toggle=self._on_tray_toggle,
                 on_quit=self._on_tray_quit,
@@ -291,10 +451,6 @@ class RemoteDaemon:
 
             while not self._shutdown_event.is_set():
                 self._shutdown_event.wait(timeout=1.0)
-
-        except Exception:
-            logger.exception("Remote client error")
-            raise
         finally:
             self._cleanup()
 
@@ -305,13 +461,17 @@ class RemoteDaemon:
             self._control_server = None
         logger.info("Cleaning up")
         self._running = False
-
-        if self._recorder is not None and self._recorder.is_recording:
-            self._recorder.stop()
-
+        worker = self._worker
+        if worker is not None and worker.is_alive():
+            with self._lock:
+                self._cancel_generation += 1
+            worker.join()
+        client, self._stream_client = self._stream_client, None
+        if client is not None:
+            client.disconnect()
         if self._tray is not None:
             self._tray.stop()
-
+            self._tray = None
         self._remove_pid()
         logger.info("Remote client stopped")
 

@@ -29,6 +29,7 @@ cannot tolerate an arbitrary one. The module itself must stay import-light:
 import importlib
 import logging
 import os
+import re
 import signal
 import threading
 import time
@@ -36,7 +37,7 @@ import traceback
 from multiprocessing.connection import Connection
 from typing import Any
 
-from voiced.config import Config
+from voiced.config import Config, TranscriptionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,7 @@ class _WorkerState:
         self._synthesizer: Any = None
         self._diarizer: Any = None
         self._model_lock = threading.Lock()
+        self._stt_lock = threading.RLock()
         self._send_lock = threading.Lock()
 
     def send(self, message: tuple) -> None:
@@ -188,6 +190,14 @@ class _WorkerState:
 
 
 def _dispatch(state: _WorkerState, op: str, kwargs: dict) -> Any:
+    """Serialize STT calls with live transcriber config updates."""
+    if op.startswith("stt."):
+        with state._stt_lock:
+            return _dispatch_unlocked(state, op, kwargs)
+    return _dispatch_unlocked(state, op, kwargs)
+
+
+def _dispatch_unlocked(state: _WorkerState, op: str, kwargs: dict) -> Any:
     """Execute a non-streaming op and return its result payload."""
     if op == "stt.transcribe_file":
         value = state.transcriber.transcribe_file(kwargs["path"])
@@ -205,6 +215,18 @@ def _dispatch(state: _WorkerState, op: str, kwargs: dict) -> Any:
         )
     elif op == "stt.transcribe_partial":
         value = state.transcriber.transcribe_partial(kwargs["audio"])
+    elif op == "stt.update_config":
+        config = kwargs["config"]
+        if not isinstance(config, TranscriptionConfig):
+            raise TypeError("config must be a TranscriptionConfig")
+        state.config.transcription = config
+        if state._transcriber is not None:
+            state._transcriber.config = config
+            state._transcriber._replacements = [
+                (re.compile(rf"\b{re.escape(wrong)}\b", re.IGNORECASE), right)
+                for wrong, right in config.replacements.items()
+            ]
+        return None
     elif op == "stt.warmup":
         state.transcriber.warmup()
         value = None

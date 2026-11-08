@@ -12,6 +12,7 @@ and WebRTC manager use them unchanged. This module must not import torch,
 NeMo, or Kokoro.
 """
 
+import copy
 import itertools
 import logging
 import queue
@@ -161,6 +162,7 @@ class WorkerHost:
         path_op_deadline: float = _PATH_OP_DEADLINE,
     ):
         self._config = config
+        self._config_lock = threading.RLock()
         self._transcriber_factory = transcriber_factory
         self._synthesizer_factory = synthesizer_factory
         self._diarizer_factory = diarizer_factory
@@ -186,11 +188,13 @@ class WorkerHost:
     def _spawn(self) -> _WorkerHandle:
         ctx = get_context("spawn")
         parent_conn, child_conn = ctx.Pipe(duplex=True)
+        with self._config_lock:
+            config = self._config
         process = ctx.Process(
             target=worker_main,
             args=(
                 child_conn,
-                self._config,
+                config,
                 self._transcriber_factory,
                 self._synthesizer_factory,
                 self._diarizer_factory,
@@ -298,6 +302,16 @@ class WorkerHost:
         logger.info("Inference worker stopped")
 
     # ----- requests -----
+
+    def update_transcription_config(self, config: TranscriptionConfig) -> None:
+        """Update stored STT rules and synchronously update a running worker."""
+        with self._config_lock:
+            candidate = copy.copy(self._config)
+            candidate.transcription = config
+            self._config = candidate
+            if not self._host.is_loaded:
+                return
+            self.request("stt.update_config", config=config)
 
     def request(self, op: str, **kwargs) -> Any:
         """Run one operation on the worker, starting it if needed.
@@ -497,6 +511,10 @@ class WorkerTranscriber:
         result = self._worker.request(op, **kwargs)
         self._device = result["device"]
         return result["value"]
+
+    def update_config(self, config: TranscriptionConfig) -> None:
+        self._worker.update_transcription_config(config)
+        self.config = config
 
     def warmup(self) -> None:
         self._request("stt.warmup")

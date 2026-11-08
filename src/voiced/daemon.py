@@ -152,9 +152,12 @@ class Daemon:
         self._tray: TrayIcon | None = None
         self._http_server = None  # TranscriptionServer instance
         self._session: RecordingSession | None = None
+        self._context_mode = "default"
+        self._context_lock = threading.RLock()
 
         # History
         self._history = TranscriptionHistory()
+        self._last_error: str | None = None
 
         # PID file
         self._pid_path = get_pid_path()
@@ -183,12 +186,7 @@ class Daemon:
             except Exception as e:
                 logger.warning(f"Failed to remove PID file: {e}")
 
-    # ----- IPC handlers -----
-
-    def _handle_toggle(self, args: dict) -> dict:
-        if self._session is None:
-            return {"status": "error", "message": "session not initialized"}
-        outcome = self._session.toggle()
+    def _outcome(self, outcome) -> dict:
         return {
             "status": "ok" if outcome.kind != ToggleOutcomeKind.REJECTED else "rejected",
             "outcome": outcome.kind.value,
@@ -196,19 +194,139 @@ class Daemon:
             "reason": outcome.reason,
         }
 
+    def _handle_toggle(self, args: dict) -> dict:
+        if self._session is None:
+            return {"status": "error", "message": "session not initialized"}
+        return self._outcome(self._session.toggle())
+
+    def _handle_start_recording(self, args: dict) -> dict:
+        if self._session is None:
+            return {"status": "error", "message": "session not initialized"}
+        return self._outcome(self._session.start())
+
+    def _handle_stop_recording(self, args: dict) -> dict:
+        if self._session is None:
+            return {"status": "error", "message": "session not initialized"}
+        return self._outcome(self._session.stop())
+
+    def _handle_cancel(self, args: dict) -> dict:
+        if self._session is None:
+            return {"status": "error", "message": "session not initialized"}
+        return self._outcome(self._session.cancel())
+
+    def _handle_history(self, args: dict) -> dict:
+        return {
+            "status": "ok",
+            "history": [self._serialize_entry(e) for e in self._history.get_all()],
+        }
+
+    @staticmethod
+    def _serialize_entry(entry: HistoryEntry) -> dict:
+        return {
+            "id": entry.id,
+            "text": entry.text,
+            "timestamp": entry.timestamp.isoformat(),
+            "preview": entry.preview,
+        }
+
+    def _handle_copy_last(self, args: dict) -> dict:
+        entries = self._history.get_all()
+        if not entries:
+            return {"status": "error", "message": "no transcript available"}
+        success = inject_to_clipboard(entries[0].text)
+        return {
+            "status": "ok" if success else "error",
+            "text": entries[0].text,
+            "message": None if success else "clipboard copy failed",
+        }
+
     def _handle_status(self, args: dict) -> dict:
         state = self.state
+        history = self._history.get_all()
+        with self._context_lock:
+            context_mode = self._context_mode
         return {
             "status": "ok",
             "state": state.value,
             "transcribing": state == SessionState.TRANSCRIBING,
-            "history_count": len(self._history.get_all()),
+            "history_count": len(history),
+            "history": [self._serialize_entry(e) for e in history],
+            "last_transcript": history[0].text if history else None,
+            "error": self._last_error,
+            "mode": "local",
             "model": STT_MODEL,
             "device": self.config.transcription.device,
+            "input_level": self._input_level(),
+            "context_mode": context_mode,
         }
 
+    def _input_level(self) -> float:
+        recorder = self._session.recorder if self._session else None
+        return recorder.input_level if recorder is not None else 0.0
+
+    def _handle_set_context_mode(self, args: dict) -> dict:
+        mode = args.get("mode")
+        if not isinstance(mode, str) or not mode:
+            return {"status": "error", "message": "mode must be a non-empty string"}
+        with self._context_lock:
+            if mode != "default" and mode not in self.config.transcription.context_replacements:
+                return {"status": "error", "message": f"unknown context mode: {mode}"}
+            self._context_mode = mode
+            return {"status": "ok", "context_mode": mode}
+
+    def _fix_context(self, text: str) -> str:
+        import re
+
+        with self._context_lock:
+            mode = self._context_mode
+            replacements = dict(self.config.transcription.context_replacements.get(mode, {}))
+        for wrong, right in replacements.items():
+            text = re.sub(rf"\b{re.escape(wrong)}\b", lambda _: right, text, flags=re.IGNORECASE)
+        return text
+
+    def _handle_update_replacements(self, args: dict) -> dict:
+        replacements = args.get("replacements")
+        context_replacements = args.get(
+            "context_replacements", self.config.transcription.context_replacements
+        )
+        if not self._valid_replacement_map(replacements) or not self._valid_context_replacements(
+            context_replacements
+        ):
+            return {"status": "error", "message": "invalid replacement mappings"}
+        updated = dict(replacements)
+        updated_context = {mode: dict(mapping) for mode, mapping in context_replacements.items()}
+        with self._context_lock:
+            active_mode = self._context_mode
+        if active_mode != "default" and active_mode not in updated_context:
+            return {"status": "error", "message": f"unknown context mode: {active_mode}"}
+        from copy import copy
+
+        candidate = copy(self.config.transcription)
+        candidate.replacements = updated
+        candidate.context_replacements = updated_context
+        try:
+            if self._voiced is not None:
+                self._voiced.transcriber.update_config(candidate)
+        except Exception as exc:
+            logger.exception("Failed to update live transcription replacements")
+            return {"status": "error", "message": str(exc)}
+        self.config.transcription = candidate
+        return {"status": "ok", "context_mode": active_mode}
+
+    @staticmethod
+    def _valid_replacement_map(mapping) -> bool:
+        return isinstance(mapping, dict) and all(
+            isinstance(key, str) and isinstance(value, str) for key, value in mapping.items()
+        )
+
+    @classmethod
+    def _valid_context_replacements(cls, mapping) -> bool:
+        return isinstance(mapping, dict) and all(
+            isinstance(mode, str) and cls._valid_replacement_map(replacements)
+            for mode, replacements in mapping.items()
+        )
+
     def _handle_stop(self, args: dict) -> dict:
-        logger.info("Received stop command")
         self._shutdown_event.set()
         return {"status": "ok", "message": "Daemon stopping"}
 
@@ -223,20 +341,21 @@ class Daemon:
             audio.beep_stop()
 
     def _on_session_result(self, result: TranscriptionResult) -> None:
-        if not result.text:
+        text = self._fix_context(result.text)
+        if not text:
             logger.warning("Empty transcription result")
             if self.config.audio.beep_enabled:
                 audio.beep_error()
             return
 
-        logger.info(f"Transcribed: {result.text[:100]}...")
-        entry = self._history.add(result.text)
+        self._last_error = None
+        entry = self._history.add(text)
         logger.debug(f"Added to history: entry {entry.id}")
 
         if self._tray is not None:
             self._tray.notify_menu_updated(self._history.revision)
 
-        success = inject_to_clipboard(result.text)
+        success = inject_to_clipboard(text)
         if self.config.audio.beep_enabled:
             if success:
                 audio.beep_success()
@@ -244,7 +363,7 @@ class Daemon:
                 audio.beep_error()
 
     def _on_session_error(self, exc: BaseException) -> None:
-        logger.error(f"Recording session error: {exc}")
+        self._last_error = str(exc)
         if self.config.audio.beep_enabled:
             audio.beep_error()
 
@@ -294,7 +413,14 @@ class Daemon:
             self._server = Server()
             self._server.register_handler("toggle", self._handle_toggle)
             self._server.register_handler("status", self._handle_status)
+            self._server.register_handler("start", self._handle_start_recording)
+            self._server.register_handler("stop_recording", self._handle_stop_recording)
+            self._server.register_handler("cancel", self._handle_cancel)
+            self._server.register_handler("history", self._handle_history)
+            self._server.register_handler("copy_last", self._handle_copy_last)
             self._server.register_handler("stop", self._handle_stop)
+            self._server.register_handler("set_context_mode", self._handle_set_context_mode)
+            self._server.register_handler("update_replacements", self._handle_update_replacements)
             self._server.start()
 
             # Tray icon
@@ -367,7 +493,7 @@ class Daemon:
 
         if self._server is not None:
             self._server.stop()
-
+            self._server = None
         if self._voiced is not None:
             self._voiced.shutdown()
             self._voiced = None

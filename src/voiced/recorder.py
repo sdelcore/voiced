@@ -40,6 +40,11 @@ class Recorder:
         self._recording_thread: threading.Thread | None = None
         self._audio_buffer: list[np.ndarray] = []
         self._chunk_buffer: list[np.ndarray] = []
+        self._input_level = 0.0
+
+    @property
+    def input_level(self) -> float:
+        return self._input_level
 
     @property
     def is_recording(self) -> bool:
@@ -57,7 +62,10 @@ class Recorder:
         if status:
             logger.warning(f"Audio callback status: {status}")
         if self._is_recording:
+            self._input_level = min(float(np.sqrt(np.mean(np.square(indata)))), 1.0)
             self._audio_queue.put(indata.copy())
+        else:
+            self._input_level = 0.0
 
     def start(self) -> None:
         """Start recording audio."""

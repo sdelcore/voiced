@@ -378,6 +378,69 @@ def stop(remote_client: bool) -> None:
         sys.exit(1)
 
 
+def _send_recording_command(command: str, label: str, remote_client: bool = False) -> None:
+    """Send a recording control command over the selected Unix socket."""
+    from voiced.client import send_command
+
+    try:
+        socket_path = None
+        if remote_client:
+            from voiced.config import get_client_socket_path
+
+            socket_path = get_client_socket_path()
+        response = send_command(command, socket_path=socket_path)
+        if response.get("status") == "ok":
+            click.echo(response.get("message", label))
+        else:
+            click.echo(f"Error: {response.get('message', 'Unknown error')}", err=True)
+            raise click.exceptions.Exit(1)
+    except DaemonNotRunning:
+        target = "remote client" if remote_client else "daemon"
+        command = "voiced client" if remote_client else "voiced start"
+        click.echo(f"{target.capitalize()} is not running. Start it with: {command}", err=True)
+        raise click.exceptions.Exit(1)
+    except ClientError as e:
+        click.echo(f"Error: {e}", err=True)
+        raise click.exceptions.Exit(1)
+
+
+@main.command("start-recording")
+@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
+def start_recording(remote_client: bool) -> None:
+    """Start recording (use on a push-to-talk key press)."""
+    _send_recording_command("start", "Recording started", remote_client)
+
+
+@main.command("stop-recording")
+@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
+def stop_recording(remote_client: bool) -> None:
+    """Stop recording and transcribe (use on push-to-talk key release)."""
+    _send_recording_command("stop_recording", "Recording stopped", remote_client)
+
+
+@main.command()
+@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
+def cancel(remote_client: bool) -> None:
+    """Cancel the current recording without transcribing it."""
+    _send_recording_command("cancel", "Recording cancelled", remote_client)
+
+
+@main.command("copy-last")
+@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
+def copy_last(remote_client: bool) -> None:
+    """Copy the most recent transcription to the clipboard."""
+    _send_recording_command("copy_last", "Copied last transcription", remote_client)
+
+
+@main.command()
+@click.option("--client", "remote_client", is_flag=True, help="Connect desktop to remote client")
+def desktop(remote_client: bool) -> None:
+    """Open the desktop recording window."""
+    from voiced.desktop import DesktopWindow
+
+    DesktopWindow(client=remote_client).run()
+
+
 @main.command()
 @click.option(
     "--client",

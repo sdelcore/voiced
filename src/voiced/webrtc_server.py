@@ -446,6 +446,16 @@ class WebRTCConnectionManager:
             )
             return
 
+        if session._stt_active:
+            await session.send_message(
+                {
+                    "type": "error",
+                    "code": "STT_ALREADY_ACTIVE",
+                    "message": "STT recording is already active",
+                }
+            )
+            return
+
         session.stt_config = STTConfig(
             language=config.get("language"),
             identify_speakers=config.get("identify_speakers", False),
@@ -456,9 +466,7 @@ class WebRTCConnectionManager:
         if session.stt_track:
             session.stt_track.start_recording()
 
-        # Start partial transcription task
         session._partial_task = asyncio.create_task(self._send_partial_transcriptions(session))
-
         await session.send_message({"type": "stt_started"})
 
     async def _send_partial_transcriptions(self, session: WebRTCSession) -> None:
@@ -475,8 +483,7 @@ class WebRTCConnectionManager:
                 continue
 
             try:
-                # Run transcription in thread pool (blocking call)
-                loop = asyncio.get_event_loop()
+                loop = asyncio.get_running_loop()
                 text = await loop.run_in_executor(
                     None,
                     self._transcribe_partial,
@@ -494,6 +501,14 @@ class WebRTCConnectionManager:
                     )
             except Exception as e:
                 logger.warning(f"Partial transcription failed: {e}")
+                await session.send_message(
+                    {
+                        "type": "error",
+                        "code": "STT_PARTIAL_FAILED",
+                        "message": str(e),
+                    }
+                )
+                break
 
     def _transcribe_partial(self, audio: np.ndarray) -> str:
         """Transcribe audio with fast settings for partials."""
@@ -504,10 +519,19 @@ class WebRTCConnectionManager:
 
     async def _stop_stt(self, session: WebRTCSession) -> None:
         """Stop STT recording and return final transcription."""
+        if not session._stt_active:
+            await session.send_message(
+                {
+                    "type": "error",
+                    "code": "STT_NOT_ACTIVE",
+                    "message": "STT recording is not active",
+                }
+            )
+            return
         session._stt_active = False
-
         if session._partial_task:
             session._partial_task.cancel()
+            await asyncio.gather(session._partial_task, return_exceptions=True)
             session._partial_task = None
 
         if not session.stt_track:
@@ -532,14 +556,25 @@ class WebRTCConnectionManager:
             )
             return
 
-        # Run final transcription in thread pool
-        loop = asyncio.get_event_loop()
-        result = await loop.run_in_executor(
-            None,
-            self._transcribe_final,
-            audio,
-            session.stt_config,
-        )
+        try:
+            # Run final transcription in thread pool
+            loop = asyncio.get_running_loop()
+            result = await loop.run_in_executor(
+                None,
+                self._transcribe_final,
+                audio,
+                session.stt_config,
+            )
+        except Exception as e:
+            logger.exception(f"Final transcription failed: {e}")
+            await session.send_message(
+                {
+                    "type": "error",
+                    "code": "STT_FINAL_FAILED",
+                    "message": str(e),
+                }
+            )
+            return
 
         await session.send_message(
             {
