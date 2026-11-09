@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from voiced import audio
+from voiced.assistant import Assistant
 from voiced.capabilities import Voiced
 from voiced.config import Config, get_pid_path, load_config
 from voiced.injector import inject_to_clipboard
@@ -151,6 +152,11 @@ class Daemon:
         self._voiced: Voiced | None = None
         self._tray: TrayIcon | None = None
         self._http_server = None  # TranscriptionServer instance
+        self._assistant: Assistant | None = None
+        self._assistant_recorder = None
+        self._assistant_lock = threading.RLock()
+        self._assistant_generation = 0
+        self._assistant_error: str | None = None
         self._session: RecordingSession | None = None
         self._context_mode = "default"
         self._context_lock = threading.RLock()
@@ -195,24 +201,102 @@ class Daemon:
         }
 
     def _handle_toggle(self, args: dict) -> dict:
-        if self._session is None:
-            return {"status": "error", "message": "session not initialized"}
-        return self._outcome(self._session.toggle())
+        with self._assistant_lock:
+            if self._assistant_recorder is not None:
+                return {"status": "error", "message": "assistant recording is active"}
+            if self._session is None:
+                return {"status": "error", "message": "session not initialized"}
+            return self._outcome(self._session.toggle())
 
     def _handle_start_recording(self, args: dict) -> dict:
-        if self._session is None:
-            return {"status": "error", "message": "session not initialized"}
-        return self._outcome(self._session.start())
+        with self._assistant_lock:
+            if self._assistant_recorder is not None:
+                return {"status": "error", "message": "assistant recording is active"}
+            if self._session is None:
+                return {"status": "error", "message": "session not initialized"}
+            return self._outcome(self._session.start())
 
     def _handle_stop_recording(self, args: dict) -> dict:
-        if self._session is None:
-            return {"status": "error", "message": "session not initialized"}
-        return self._outcome(self._session.stop())
+        with self._assistant_lock:
+            if self._assistant_recorder is not None:
+                return {"status": "error", "message": "assistant recording is active"}
+            if self._session is None:
+                return {"status": "error", "message": "session not initialized"}
+            return self._outcome(self._session.stop())
+
+    def _handle_assistant_start(self, args: dict) -> dict:
+        from voiced.recorder import Recorder
+
+        with self._assistant_lock:
+            if self._session is None:
+                return {"status": "error", "message": "session not initialized"}
+            if self._session.state != SessionState.IDLE:
+                return {"status": "error", "message": "dictation recording is active"}
+            if self._assistant is None or self._voiced is None:
+                return {"status": "error", "message": "assistant is disabled"}
+            if self._assistant_recorder is not None:
+                return {"status": "error", "message": "assistant recording already active"}
+            self._assistant_generation += 1
+            self._assistant.interrupt()
+            self._assistant_error = None
+            try:
+                recorder = Recorder(config=self.config.audio)
+                recorder.start()
+                self._assistant_recorder = recorder
+            except Exception as exc:
+                self._assistant_error = str(exc)
+                logger.exception("Failed to start assistant recording")
+                return {"status": "error", "message": str(exc)}
+        return {"status": "ok", "message": "Assistant recording started"}
+
+    def _handle_assistant_stop(self, args: dict) -> dict:
+        with self._assistant_lock:
+            recorder, self._assistant_recorder = self._assistant_recorder, None
+            if recorder is None:
+                return {"status": "error", "message": "assistant is not recording"}
+            generation = self._assistant_generation
+            try:
+                audio_data = recorder.stop()
+            except Exception as exc:
+                self._assistant_error = str(exc)
+                logger.exception("Failed to stop assistant recording")
+                return {"status": "error", "message": str(exc)}
+        if len(audio_data) == 0:
+            with self._assistant_lock:
+                if generation == self._assistant_generation:
+                    self._assistant_error = "no audio recorded"
+            return {"status": "error", "message": "no audio recorded"}
+        threading.Thread(
+            target=self._transcribe_assistant,
+            args=(audio_data, generation),
+            daemon=True,
+            name="AssistantTranscription",
+        ).start()
+        return {"status": "ok", "message": "Assistant recording stopped"}
+
+    def _transcribe_assistant(self, audio_data, generation: int) -> None:
+        try:
+            text = self._voiced.transcriber.transcribe_audio(
+                audio_data, sample_rate=self.config.audio.sample_rate
+            )
+            with self._assistant_lock:
+                if generation != self._assistant_generation or self._assistant is None:
+                    return
+                self._assistant.submit(text)
+        except Exception as exc:
+            logger.exception("Assistant transcription failed")
+            with self._assistant_lock:
+                if generation == self._assistant_generation:
+                    self._assistant_error = str(exc)
+                    self._last_error = str(exc)
 
     def _handle_cancel(self, args: dict) -> dict:
-        if self._session is None:
-            return {"status": "error", "message": "session not initialized"}
-        return self._outcome(self._session.cancel())
+        with self._assistant_lock:
+            if self._assistant_recorder is not None:
+                return {"status": "error", "message": "assistant recording is active"}
+            if self._session is None:
+                return {"status": "error", "message": "session not initialized"}
+            return self._outcome(self._session.cancel())
 
     def _handle_history(self, args: dict) -> dict:
         return {
@@ -258,6 +342,8 @@ class Daemon:
             "device": self.config.transcription.device,
             "input_level": self._input_level(),
             "context_mode": context_mode,
+            "assistant_state": self._assistant.state if self._assistant is not None else "disabled",
+            "assistant_error": self._assistant_error,
         }
 
     def _input_level(self) -> float:
@@ -415,6 +501,8 @@ class Daemon:
             self._server.register_handler("status", self._handle_status)
             self._server.register_handler("start", self._handle_start_recording)
             self._server.register_handler("stop_recording", self._handle_stop_recording)
+            self._server.register_handler("assistant_start", self._handle_assistant_start)
+            self._server.register_handler("assistant_stop", self._handle_assistant_stop)
             self._server.register_handler("cancel", self._handle_cancel)
             self._server.register_handler("history", self._handle_history)
             self._server.register_handler("copy_last", self._handle_copy_last)
@@ -440,6 +528,14 @@ class Daemon:
             # first STT/TTS operation and is terminated after the idle
             # timeout so its VRAM returns to the system.
             self._voiced = Voiced.from_config(self.config)
+
+            if self.config.assistant.base_url:
+                try:
+                    self._assistant = Assistant(self.config.assistant, self._voiced.synthesizer)
+                except Exception as exc:
+                    self._assistant_error = str(exc)
+                    self._last_error = str(exc)
+                    logger.exception("Failed to initialize assistant")
 
             # Recording session — owns state, recorder, transcription worker
             self._session = RecordingSession(
@@ -494,6 +590,16 @@ class Daemon:
         if self._server is not None:
             self._server.stop()
             self._server = None
+        with self._assistant_lock:
+            recorder, self._assistant_recorder = self._assistant_recorder, None
+            if recorder is not None:
+                try:
+                    recorder.stop()
+                except Exception:
+                    logger.exception("Failed to stop assistant recorder during shutdown")
+        if self._assistant is not None:
+            self._assistant.close()
+            self._assistant = None
         if self._voiced is not None:
             self._voiced.shutdown()
             self._voiced = None

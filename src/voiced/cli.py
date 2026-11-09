@@ -418,6 +418,20 @@ def stop_recording(remote_client: bool) -> None:
     _send_recording_command("stop_recording", "Recording stopped", remote_client)
 
 
+@main.command("assistant-start")
+@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
+def assistant_start(remote_client: bool) -> None:
+    """Start an assistant turn (use on a push-to-talk key press)."""
+    _send_recording_command("assistant_start", "Assistant recording started", remote_client)
+
+
+@main.command("assistant-stop")
+@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
+def assistant_stop(remote_client: bool) -> None:
+    """Stop assistant recording and submit the prompt (use on key release)."""
+    _send_recording_command("assistant_stop", "Assistant recording stopped", remote_client)
+
+
 @main.command()
 @click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
 def cancel(remote_client: bool) -> None:

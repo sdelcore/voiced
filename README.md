@@ -120,6 +120,46 @@ Stop the daemon:
 voiced stop
 ```
 
+### Voice Assistant
+
+The optional assistant is a separate press-to-talk workflow from dictation. It
+sends recognized text to an OpenAI-compatible chat-completions endpoint and
+speaks the response using voiced's local TTS. STT remains local as well; the
+assistant request text and conversation context are sent to the configured
+endpoint. Conversation messages are saved locally as a paper trail and reused
+for context. Protect the local conversation file and review the endpoint's data
+handling policy before sending sensitive prompts.
+
+Configure `~/.config/voiced/config.toml`:
+
+```toml
+[assistant]
+base_url = "https://api.openai.com/v1" # Or another OpenAI-compatible API base URL
+model = "your-chat-model"
+api_key_env = "OPENAI_API_KEY"         # Name of the environment variable holding the key
+timeout = 600.0
+```
+
+Export the API key variable in the environment of the voiced daemon before
+starting it. Keep the default empty `base_url` to leave the assistant disabled.
+The endpoint must support OpenAI-compatible chat completions; compatibility
+varies between providers, and this does not imply support for every OpenAI API
+feature.
+
+Bind separate key-down and key-up actions in Hyprland to submit a prompt:
+
+```ini
+bind = SUPER, A, exec, voiced assistant-start
+bindr = SUPER, A, exec, voiced assistant-stop
+```
+
+Hold the key while speaking and release it to stop capture and start the
+assistant turn. Stopping playback locally does not guarantee that the remote
+server cancels its request: there is no universal server-side cancellation or
+asynchronous job callback in the standard chat API. Response time depends on
+the provider and prompt; no fixed latency is promised.
+
+
 ### Text-to-Speech
 
 Speak text:
