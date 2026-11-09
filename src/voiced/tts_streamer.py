@@ -43,6 +43,10 @@ class AudioPlayer:
         if block:
             sd.wait()
 
+    def wait(self) -> None:
+        """Wait for the current playback to complete."""
+        sd.wait()
+
     def stop(self) -> None:
         """Stop any current playback."""
         sd.stop()

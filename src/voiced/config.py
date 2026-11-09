@@ -88,6 +88,16 @@ class ClientConfig:
 
 
 @dataclass
+class AssistantConfig:
+    """OpenAI-compatible chat assistant settings."""
+
+    base_url: str = ""
+    model: str = ""
+    api_key_env: str = "OPENAI_API_KEY"
+    timeout: float = 600.0
+
+
+@dataclass
 class Config:
     """Main configuration container."""
 
@@ -104,6 +114,7 @@ class Config:
     webrtc: WebRTCConfig = field(default_factory=WebRTCConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     client: ClientConfig = field(default_factory=ClientConfig)
+    assistant: AssistantConfig = field(default_factory=AssistantConfig)
 
 
 def get_config_path() -> Path:
@@ -216,6 +227,10 @@ def load_config() -> Config:
         for key, value in data["client"].items():
             if hasattr(config.client, key):
                 setattr(config.client, key, value)
+    if "assistant" in data:
+        for key, value in data["assistant"].items():
+            if hasattr(config.assistant, key):
+                setattr(config.assistant, key, value)
 
     return config
 
@@ -295,6 +310,12 @@ port = 8765
 [client]
 server_url = "http://127.0.0.1:8765"
 timeout = 60.0           # Request timeout in seconds
+
+[assistant]
+base_url = ""            # OpenAI-compatible chat completions URL; empty disables assistant
+model = ""               # Chat model name
+api_key_env = "OPENAI_API_KEY"  # Environment variable containing API key
+timeout = 600.0          # Chat request timeout in seconds
 """
     with open(config_path, "w") as f:
         f.write(default_config)
