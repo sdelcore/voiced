@@ -81,10 +81,14 @@ class ServerConfig:
 
 @dataclass
 class ClientConfig:
-    """HTTP client settings."""
+    """HTTP and audio client settings."""
 
     server_url: str = "http://127.0.0.1:8765"
     timeout: float = 60.0
+    audio_base_url: str = ""
+    stt_model: str = ""
+    tts_model: str = ""
+    api_key_env: str = "OPENAI_API_KEY"
 
 
 @dataclass

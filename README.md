@@ -231,6 +231,37 @@ voiced stop --client
 
 The default commands (`voiced toggle`, `voiced status`, and `voiced stop`) still target the local full daemon. Client commands use a separate local Unix socket; the configured server URL is only for inference. If the selected process is not running, the command reports that target as unavailable rather than falling back to the other process.
 
+#### OpenAI-compatible remote audio
+
+Configure optional remote client audio and assistant chat independently in `~/.config/voiced/config.toml`:
+
+```toml
+[client]
+audio_base_url = "https://api.openai.com/v1"
+stt_model = "your-transcription-model"
+tts_model = "your-speech-model"
+api_key_env = "OPENAI_API_KEY"
+timeout = 600.0
+
+[assistant]
+base_url = "https://api.openai.com/v1"
+model = "your-chat-model"
+api_key_env = "OPENAI_API_KEY"
+timeout = 600.0
+```
+
+`client.audio_base_url` enables the OpenAI-compatible audio mode; leave it empty to retain the voiced server behavior. It sends captured WAV audio as multipart `file` to `/audio/transcriptions` with `stt_model`, and requests WAV speech from `/audio/speech` with `tts_model`. Both use the environment variable named by `api_key_env` as a Bearer token. Export the variable in the environment of the client process before starting it. `[assistant]` separately configures OpenAI-compatible chat completions and uses its named key environment variable in the daemon.
+
+Use explicit `--client` commands for remote-client dictation; ordinary commands still target the local daemon:
+
+```bash
+voiced toggle --client
+voiced status --client
+voiced stop --client
+```
+
+Assistant push-to-talk remains a separate workflow, using the `[assistant]` chat settings and key-down/key-up bindings shown above. Remote audio sends microphone recordings to the provider for transcription and speech text for synthesis. Requests are non-streaming and return results when each request completes. Only send audio or text when the provider's retention and processing practices are acceptable.
+
 **Test with curl:**
 ```bash
 # Transcription
@@ -481,6 +512,7 @@ print(text)
 config = TranscriptionConfig(device="cuda", language="en")
 transcriber = Transcriber(config)
 text = transcriber.transcribe_file("audio.wav")
+print(text)
 ```
 
 ### Transcribe with Timestamps

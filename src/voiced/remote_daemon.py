@@ -16,8 +16,11 @@ from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from voiced import audio
+from voiced.assistant import Assistant
 from voiced.config import Config, get_cache_dir, get_client_socket_path, load_config
 from voiced.injector import inject_to_clipboard
+from voiced.openai_audio import OpenAIAudio
+from voiced.recorder import Recorder
 from voiced.server import Server
 from voiced.tray import TrayIcon, TrayState
 from voiced.webrtc_client import SyncWebRTCClient, WebRTCClientConfig
@@ -79,6 +82,16 @@ class RemoteDaemon:
         self._pid_path = get_cache_dir() / "client.pid"
         self._worker: threading.Thread | None = None
         self._stream_client: SyncWebRTCClient | None = None
+        self._assistant: Assistant | None = None
+        self._assistant_recorder: Recorder | None = None
+        self._assistant_lock = threading.RLock()
+        self._assistant_generation = 0
+        self._assistant_error: str | None = None
+        self._audio_recorder: Recorder | None = None
+        self._audio_generation = 0
+        self._audio_provider: OpenAIAudio | None = None
+        if self.config.client.audio_base_url:
+            self._audio_provider = OpenAIAudio(self.config.client)
 
     @property
     def state(self) -> ClientState:
@@ -107,6 +120,19 @@ class RemoteDaemon:
                 logger.warning(f"Failed to remove PID file: {e}")
 
     def _handle_toggle(self, args: dict | None = None) -> dict:
+        if self._audio_provider is not None:
+            with self._lock:
+                if self._state == ClientState.IDLE:
+                    if self._worker is not None and self._worker.is_alive():
+                        return self._result("rejected", "transcription in progress")
+                    return self._handle_dictation_start(args)
+                if self._state == ClientState.RECORDING:
+                    return self._handle_dictation_stop(args)
+                return {
+                    "status": "rejected",
+                    "state": "transcribing",
+                    "reason": "transcription in progress",
+                }
         with self._lock:
             if self._state == ClientState.IDLE:
                 if self._worker is not None and self._worker.is_alive():
@@ -130,6 +156,8 @@ class RemoteDaemon:
         return result
 
     def _handle_start_recording(self, args: dict | None = None) -> dict:
+        if self._audio_provider is not None:
+            return self._handle_dictation_start(args)
         with self._lock:
             if self._state != ClientState.IDLE or (
                 self._worker is not None and self._worker.is_alive()
@@ -138,22 +166,219 @@ class RemoteDaemon:
             return self._start_recording()
 
     def _handle_stop_recording(self, args: dict | None = None) -> dict:
+        if self._audio_provider is not None:
+            return self._handle_dictation_stop(args)
         with self._lock:
             if self._state != ClientState.RECORDING:
                 return self._result("rejected", "not recording")
             return self._stop_and_send()
 
+    def _handle_assistant_start(self, _args: dict | None = None) -> dict:
+        with self._assistant_lock, self._lock:
+            if self._audio_provider is None or not self.config.assistant.base_url:
+                return {"status": "error", "message": "assistant is disabled"}
+            if self._state != ClientState.IDLE:
+                return {"status": "error", "message": "dictation recording is active"}
+            if self._assistant_recorder is not None:
+                return {"status": "error", "message": "assistant recording already active"}
+            self._assistant_generation += 1
+            if self._assistant is None:
+                self._assistant = Assistant(self.config.assistant, self._audio_provider)
+            self._assistant.interrupt()
+            self._assistant_error = None
+            try:
+                recorder = Recorder(config=self.config.audio)
+                recorder.start()
+                self._assistant_recorder = recorder
+            except Exception as exc:
+                self._assistant_error = str(exc)
+                logger.exception("Failed to start assistant recording")
+                return {"status": "error", "message": str(exc)}
+        if self.config.audio.beep_enabled:
+            threading.Thread(target=audio.beep_start, daemon=True).start()
+        return {"status": "ok", "message": "Assistant recording started"}
+
+    def _handle_assistant_stop(self, _args: dict | None = None) -> dict:
+        with self._assistant_lock:
+            recorder, self._assistant_recorder = self._assistant_recorder, None
+            if recorder is None:
+                return {"status": "error", "message": "assistant is not recording"}
+            generation = self._assistant_generation
+            try:
+                audio_data = recorder.stop()
+            except Exception as exc:
+                self._assistant_error = str(exc)
+                logger.exception("Failed to stop assistant recording")
+                return {"status": "error", "message": str(exc)}
+        if self.config.audio.beep_enabled:
+            try:
+                audio.beep_stop()
+            except Exception as exc:
+                with self._assistant_lock:
+                    self._assistant_error = str(exc)
+                return {"status": "error", "message": str(exc)}
+        if len(audio_data) == 0:
+            with self._assistant_lock:
+                if generation == self._assistant_generation:
+                    self._assistant_error = "no audio recorded"
+            return {"status": "error", "message": "no audio recorded"}
+        threading.Thread(
+            target=self._transcribe_assistant,
+            args=(audio_data, self.config.audio.sample_rate, generation),
+            daemon=True,
+            name="RemoteAssistantTranscription",
+        ).start()
+        return {"status": "ok", "message": "Assistant recording stopped"}
+
+    def _transcribe_assistant(self, audio_data, sample_rate: int, generation: int) -> None:
+        try:
+            provider = self._audio_provider
+            if provider is None:
+                raise RuntimeError("Remote audio provider is unavailable")
+            text = provider.transcribe(audio_data, sample_rate)
+            with self._assistant_lock:
+                if generation != self._assistant_generation or self._assistant is None:
+                    return
+                self._assistant.submit(text)
+        except Exception as exc:
+            logger.exception("Assistant transcription failed")
+            with self._assistant_lock:
+                if generation == self._assistant_generation:
+                    self._assistant_error = str(exc)
+                    self._last_error = str(exc)
+
+    def _handle_dictation_start(self, _args: dict | None = None) -> dict:
+        with self._assistant_lock, self._lock:
+            if self._state != ClientState.IDLE or (
+                self._worker is not None and self._worker.is_alive()
+            ):
+                return self._result("rejected", "not idle or transcription in progress")
+            if self._assistant_recorder is not None:
+                return self._result("rejected", "assistant recording is active")
+            try:
+                recorder = Recorder(config=self.config.audio)
+                recorder.start()
+                self._audio_recorder = recorder
+                self._audio_generation += 1
+                self._state = ClientState.RECORDING
+                self._partial_text = ""
+                self._last_error = None
+            except Exception as exc:
+                self._last_error = str(exc)
+                return self._result("error", str(exc))
+        if self.config.audio.beep_enabled:
+            threading.Thread(target=audio.beep_start, daemon=True).start()
+        return self._result()
+
+    def _handle_dictation_stop(self, _args: dict | None = None) -> dict:
+        with self._lock:
+            recorder, self._audio_recorder = self._audio_recorder, None
+            if recorder is None or self._state != ClientState.RECORDING:
+                return self._result("rejected", "not recording")
+            generation = self._audio_generation
+            self._state = ClientState.SENDING
+            self._partial_text = ""
+            try:
+                audio_data = recorder.stop()
+            except Exception as exc:
+                self._last_error = str(exc)
+                self._state = ClientState.IDLE
+                return self._result("error", str(exc))
+        if self.config.audio.beep_enabled:
+            try:
+                audio.beep_stop()
+            except Exception as exc:
+                with self._lock:
+                    if generation == self._audio_generation:
+                        self._last_error = str(exc)
+                        self._state = ClientState.IDLE
+                return self._result("error", str(exc))
+        if len(audio_data) == 0:
+            with self._lock:
+                if generation == self._audio_generation:
+                    self._last_error = "no audio recorded"
+                    self._state = ClientState.IDLE
+            self._update_tray_state()
+            return self._result("error", "no audio recorded")
+        worker = threading.Thread(
+            target=self._transcribe_dictation,
+            args=(audio_data, self.config.audio.sample_rate, generation),
+            daemon=True,
+            name="RemoteDictationWorker",
+        )
+        with self._lock:
+            if generation != self._audio_generation or self._state != ClientState.SENDING:
+                return self._result("rejected", "recording cancelled")
+            self._worker = worker
+            worker.start()
+        self._update_tray_state()
+        return self._result()
+
+    def _transcribe_dictation(self, audio_data, sample_rate: int, generation: int) -> None:
+        worker = threading.current_thread()
+        try:
+            provider = self._audio_provider
+            if provider is None:
+                raise RuntimeError("Remote audio provider is unavailable")
+            with self._lock:
+                mode = self._context_mode
+            text = self._fix_context(provider.transcribe(audio_data, sample_rate), mode)
+            with self._lock:
+                if generation != self._audio_generation:
+                    return
+                if text:
+                    entry = {
+                        "id": self._next_history_id,
+                        "text": text,
+                        "timestamp": datetime.now().isoformat(),
+                        "preview": (text[:50] + ("..." if len(text) > 50 else "")).replace(
+                            "\\n", " "
+                        ),
+                    }
+                    self._history.appendleft(entry)
+                    self._next_history_id += 1
+                    self._last_error = None
+                    inject_to_clipboard(text)
+                else:
+                    self._last_error = "No text transcribed"
+        except Exception as exc:
+            with self._lock:
+                if generation == self._audio_generation:
+                    self._last_error = str(exc)
+            logger.exception("Remote dictation transcription failed")
+        finally:
+            with self._lock:
+                if self._worker is worker:
+                    self._worker = None
+                if generation == self._audio_generation:
+                    self._state = ClientState.IDLE
+            self._update_tray_state()
+
     def _handle_cancel(self, args: dict | None = None) -> dict:
+        with self._assistant_lock:
+            if self._assistant_recorder is not None:
+                return {"status": "error", "message": "assistant recording is active"}
+            if self._assistant is not None:
+                self._assistant.interrupt()
         with self._lock:
             if self._state not in (ClientState.RECORDING, ClientState.SENDING):
                 return self._result("rejected", "not recording")
             self._cancel_generation += 1
-            client = self._stream_client
-            self._stream_client = None
-            self._state = ClientState.IDLE
-            self._partial_text = ""
-        if client is not None:
-            client.disconnect()
+            self._audio_generation += 1
+            audio_recorder, self._audio_recorder = self._audio_recorder, None
+            if audio_recorder is not None:
+                self._state = ClientState.IDLE
+                self._partial_text = ""
+                stream_client = None
+            else:
+                stream_client = self._stream_client
+                self._stream_client = None
+                self._state = ClientState.IDLE
+                self._partial_text = ""
+        if audio_recorder is not None:
+            audio_recorder.stop()
+        if stream_client is not None:
+            stream_client.disconnect()
         self._update_tray_state()
         return self._result()
 
@@ -178,7 +403,7 @@ class RemoteDaemon:
             input_level = (
                 self._stream_client.input_level if self._stream_client is not None else 0.0
             )
-            return {
+            status = {
                 "status": "ok",
                 "state": "transcribing"
                 if self._state == ClientState.SENDING
@@ -195,6 +420,12 @@ class RemoteDaemon:
                 "input_level": input_level,
                 "context_mode": self._context_mode,
             }
+        with self._assistant_lock:
+            status["assistant_state"] = (
+                self._assistant.state if self._assistant is not None else "idle"
+            )
+            status["assistant_error"] = self._assistant_error
+        return status
 
     def _handle_set_context_mode(self, args: dict | None = None) -> dict:
         mode = (args or {}).get("mode")
@@ -417,7 +648,7 @@ class RemoteDaemon:
         """Run the remote client daemon."""
         logger.info(f"Starting remote client (server: {self.server_url})")
 
-        if not self._check_server():
+        if self._audio_provider is None and not self._check_server():
             logger.error("Cannot connect to server. Is it running?")
             sys.exit(1)
 
@@ -427,8 +658,16 @@ class RemoteDaemon:
         try:
             self._control_server = Server(get_client_socket_path())
             self._control_server.register_handler("toggle", self._handle_toggle)
-            self._control_server.register_handler("start", self._handle_start_recording)
-            self._control_server.register_handler("stop_recording", self._handle_stop_recording)
+            if self._audio_provider is not None:
+                self._control_server.register_handler("start", self._handle_dictation_start)
+                self._control_server.register_handler("stop_recording", self._handle_dictation_stop)
+                self._control_server.register_handler(
+                    "assistant_start", self._handle_assistant_start
+                )
+                self._control_server.register_handler("assistant_stop", self._handle_assistant_stop)
+            else:
+                self._control_server.register_handler("start", self._handle_start_recording)
+                self._control_server.register_handler("stop_recording", self._handle_stop_recording)
             self._control_server.register_handler("cancel", self._handle_cancel)
             self._control_server.register_handler("status", self._handle_client_status)
             self._control_server.register_handler("history", self._handle_history)
@@ -461,11 +700,29 @@ class RemoteDaemon:
             self._control_server = None
         logger.info("Cleaning up")
         self._running = False
-        worker = self._worker
+        with self._lock:
+            worker = self._worker
+            self._audio_generation += 1
+            self._cancel_generation += 1
+            audio_recorder, self._audio_recorder = self._audio_recorder, None
+            if audio_recorder is not None:
+                try:
+                    audio_recorder.stop()
+                except Exception:
+                    logger.debug("Could not stop local audio recording", exc_info=True)
         if worker is not None and worker.is_alive():
-            with self._lock:
-                self._cancel_generation += 1
             worker.join()
+        with self._assistant_lock:
+            assistant_recorder, self._assistant_recorder = self._assistant_recorder, None
+            self._assistant_generation += 1
+            if assistant_recorder is not None:
+                try:
+                    assistant_recorder.stop()
+                except Exception:
+                    logger.debug("Could not stop assistant recording", exc_info=True)
+            if self._assistant is not None:
+                self._assistant.close()
+                self._assistant = None
         client, self._stream_client = self._stream_client, None
         if client is not None:
             client.disconnect()
