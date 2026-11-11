@@ -28,6 +28,9 @@ def test_remote_start_stop_records_and_delivers_transcript(monkeypatch):
     connected = []
     delivered = []
     partial_received = threading.Event()
+    partial_release = threading.Event()
+    stop_entered = threading.Event()
+    stop_release = threading.Event()
 
     class Stream:
         input_level = 0.25
@@ -41,10 +44,13 @@ def test_remote_start_stop_records_and_delivers_transcript(monkeypatch):
             def deliver_partial():
                 on_partial("partial")
                 partial_received.set()
+                assert partial_release.wait(2)
 
             threading.Thread(target=deliver_partial).start()
 
         def stop_stt(self):
+            stop_entered.set()
+            assert stop_release.wait(2)
             return SimpleNamespace(text="final transcript")
 
         def disconnect(self):
@@ -61,7 +67,10 @@ def test_remote_start_stop_records_and_delivers_transcript(monkeypatch):
 
     stopped = daemon._handle_stop_recording()
     assert stopped == {"status": "ok", "state": "transcribing"}
+    assert stop_entered.wait(2)
     assert daemon._handle_status()["transcribing"]
+    stop_release.set()
+    partial_release.set()
     daemon._worker.join(2)
 
     history = daemon._handle_history()["history"]
@@ -194,6 +203,23 @@ def test_overlay_shows_recording_and_errors_then_hides_when_idle():
         def set_value(self, value):
             self.value = value
 
+    class StyleContext:
+        def __init__(self):
+            self.classes = set()
+
+        def add_class(self, name):
+            self.classes.add(name)
+
+        def remove_class(self, name):
+            self.classes.discard(name)
+
+    class RecordingBar:
+        def __init__(self):
+            self.style_context = StyleContext()
+
+        def get_style_context(self):
+            return self.style_context
+
     class Overlay:
         def __init__(self):
             self.shown = False
@@ -205,6 +231,7 @@ def test_overlay_shows_recording_and_errors_then_hides_when_idle():
             self.shown = False
 
     window = _WindowStub()
+    window.recording_bar = RecordingBar()
     window.state_label = Label()
     window._context_modes = []
     window._last_status = {}
@@ -231,12 +258,14 @@ def test_overlay_shows_recording_and_errors_then_hides_when_idle():
 
     window._render_status({"state": "recording", "input_level": 0.4, "partial_text": "hello"})
     assert window.overlay.shown
+    assert "recording" in window.recording_bar.style_context.classes
     assert window.overlay_state.text == "Recording"
     assert window.level.value == 0.4
     assert window.transcript == "hello"
 
     window._render_status({"state": "idle", "error": "microphone failed"})
     assert window.overlay.shown
+    assert "recording" not in window.recording_bar.style_context.classes
     assert window.overlay_error.text == "microphone failed"
     window._render_status({"state": "idle", "error": None})
     assert not window.overlay.shown

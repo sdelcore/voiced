@@ -22,17 +22,17 @@ class TestCLI:
         assert result.exit_code == 0
         assert "Voice Daemon" in result.output
 
-    def test_status_not_running(self):
-        """Test status when daemon is not running."""
-        runner = CliRunner()
-        result = runner.invoke(main, ["status"])
-        # Should exit with code 1 if daemon is not running
-        assert "not running" in result.output.lower() or result.exit_code == 1
+    def test_status_not_running(self, monkeypatch, tmp_path):
+        """Test status when the isolated daemon is not running."""
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        result = CliRunner().invoke(main, ["status"])
+        assert result.exit_code == 1
+        assert "not running" in result.output.lower()
 
-    def test_toggle_not_running(self):
-        """Test toggle when daemon is not running."""
-        runner = CliRunner()
-        result = runner.invoke(main, ["toggle"])
+    def test_toggle_not_running(self, monkeypatch, tmp_path):
+        """Test toggle when the isolated daemon is not running."""
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        result = CliRunner().invoke(main, ["toggle"])
         assert result.exit_code == 1
         assert "not running" in result.output.lower()
 
@@ -55,7 +55,6 @@ class TestCLI:
 
         daemon._on_tray_quit()
         assert daemon._shutdown_event.is_set() is True
-        assert daemon._handle_client_stop({}) == {"status": "ok"}
 
     def test_cleanup_stops_control_socket_before_removing_pid(self, tmp_path):
         from voiced.config import AudioConfig, Config
@@ -77,66 +76,76 @@ class TestCLI:
 
         assert events == ["socket", "pid"]
 
-    def test_toggle_client_targets_remote_client_socket(self, monkeypatch, tmp_path):
-        from voiced import client
+    def test_start_launches_gateway_client(self, monkeypatch):
+        from types import SimpleNamespace
 
-        socket_path = tmp_path / "client-control.sock"
-        sent = {}
+        from voiced import remote_daemon
 
-        def send_command(command, socket_path=None):
-            sent["command"] = command
-            sent["socket_path"] = socket_path
-            return {"status": "ok", "state": "recording"}
-
-        monkeypatch.setattr(client, "send_command", send_command)
-        monkeypatch.setattr("voiced.config.get_client_socket_path", lambda: socket_path)
-
-        result = CliRunner().invoke(main, ["toggle", "--client"])
-
-        assert result.exit_code == 0
-        assert sent == {"command": "toggle", "socket_path": socket_path}
-        assert "State: recording" in result.output
-
-    def test_client_status_uses_client_socket(self, monkeypatch, tmp_path):
-        from voiced import client
-
-        socket_path = tmp_path / "client-control.sock"
         calls = []
-        monkeypatch.setattr("voiced.config.get_client_socket_path", lambda: socket_path)
+        monkeypatch.setattr(remote_daemon, "is_gateway_running", lambda: False)
         monkeypatch.setattr(
-            client,
-            "send_command",
-            lambda command, socket_path=None: (
-                calls.append((command, socket_path))
-                or {"status": "ok", "state": "idle", "server": "http://nightman.tap:8765"}
-            ),
+            "voiced.cli.load_config",
+            lambda: SimpleNamespace(client=SimpleNamespace(audio_base_url="")),
         )
+        monkeypatch.setattr("voiced.config.get_server_url", lambda: "http://gateway.example")
 
-        result = CliRunner().invoke(main, ["status", "--client"])
+        class FakeRemoteDaemon:
+            def __init__(self, server_url, config):
+                calls.append((server_url, config))
+
+            def run(self):
+                calls.append("run")
+
+        monkeypatch.setattr(remote_daemon, "RemoteDaemon", FakeRemoteDaemon)
+        result = CliRunner().invoke(main, ["start"])
 
         assert result.exit_code == 0
-        assert calls == [("status", socket_path)]
-        assert "http://nightman.tap:8765" in result.output
+        assert calls[0][0] == "http://gateway.example"
+        assert calls[1] == "run"
+        assert "Starting gateway client" in result.output
 
-    def test_client_stop_uses_client_socket(self, monkeypatch, tmp_path):
-        from voiced import client
+    def test_default_control_socket_commands(self, monkeypatch, tmp_path):
+        from voiced.server import Server
 
-        socket_path = tmp_path / "client-control.sock"
-        calls = []
-        monkeypatch.setattr("voiced.config.get_client_socket_path", lambda: socket_path)
-        monkeypatch.setattr(
-            client,
-            "send_command",
-            lambda command, socket_path=None: (
-                calls.append((command, socket_path)) or {"status": "ok"}
-            ),
-        )
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path))
+        server = Server()
+        state = {"recording": False}
 
-        result = CliRunner().invoke(main, ["stop", "--client"])
+        def status(_args):
+            return {
+                "status": "ok",
+                "state": "recording" if state["recording"] else "idle",
+                "model": "test-model",
+                "device": "cpu",
+            }
 
-        assert result.exit_code == 0
-        assert calls == [("stop", socket_path)]
-        assert "Remote client stopping" in result.output
+        def toggle(_args):
+            state["recording"] = not state["recording"]
+            return {"status": "ok", "state": "recording" if state["recording"] else "idle"}
+
+        def stop(_args):
+            return {"status": "ok"}
+
+        server.register_handler("status", status)
+        server.register_handler("toggle", toggle)
+        server.register_handler("stop", stop)
+        server.start()
+        try:
+            status_result = CliRunner().invoke(main, ["status"])
+            assert status_result.exit_code == 0
+            assert "Status: running" in status_result.output
+            assert "State: idle" in status_result.output
+            assert "Model: test-model" in status_result.output
+
+            toggle_result = CliRunner().invoke(main, ["toggle"])
+            assert toggle_result.exit_code == 0
+            assert "State: recording" in toggle_result.output
+
+            stop_result = CliRunner().invoke(main, ["stop"])
+            assert stop_result.exit_code == 0
+            assert "Gateway client stopping" in stop_result.output
+        finally:
+            server.stop()
 
     def test_devices_command(self):
         """Test devices listing."""

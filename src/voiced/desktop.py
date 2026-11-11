@@ -13,9 +13,9 @@ from typing import Any
 from voiced.client import ClientError, DaemonNotRunning, send_command
 from voiced.config import (
     get_cache_dir,
-    get_client_socket_path,
     get_config_path,
     get_server_url,
+    get_socket_path,
     load_config,
 )
 from voiced.desktop_history import TranscriptHistory
@@ -86,8 +86,11 @@ def _gtk():
 class DesktopWindow:
     """GTK companion backed by daemon IPC, with capture actions in local threads."""
 
-    def __init__(self, socket_path=None, *, client: bool = False, persist_history: bool = False):
-        self.socket_path = socket_path or (get_client_socket_path() if client else None)
+    def __init__(
+        self, socket_path=None, *, persist_history: bool = False, start_hidden: bool = False
+    ):
+        self.socket_path = socket_path or get_socket_path()
+        self.start_hidden = start_hidden
         self._Gtk, self._GLib, self._layer_shell, self._Gdk = _gtk()
         self._last_status: dict[str, Any] = {}
         self._busy = False
@@ -108,13 +111,14 @@ class DesktopWindow:
         self._local_transcriber = None
         self._poll_source = None
         self.window = self._Gtk.Window(title="Voiced")
-        self.window.set_default_size(420, 600)
-        self.window.set_accept_focus(True)
+        self.window.set_default_size(520, 700)
+        self.window.set_title("Voiced — History")
         self.window.set_focus_on_map(True)
         self.window.connect("destroy", self._on_destroy)
         self._build_ui()
         self.overlay = self._build_overlay()
-        self.window.show_all()
+        if not self.start_hidden:
+            self.window.show_all()
         self._poll_source = self._GLib.timeout_add(POLL_INTERVAL_MS, self._poll)
         self._poll()
 
@@ -133,6 +137,7 @@ class DesktopWindow:
         overlay.set_keep_above(True)
         box = gtk.Box(orientation=gtk.Orientation.VERTICAL, spacing=4)
         box.set_border_width(10)
+        box.get_style_context().add_class("hero")
         overlay.add(box)
         self.overlay_state = gtk.Label(label="Idle", xalign=0)
         self.overlay_timer = gtk.Label(label="00:00", xalign=0)
@@ -156,47 +161,79 @@ class DesktopWindow:
             layer_shell.set_anchor(overlay, layer_shell.Edge.RIGHT, True)
             layer_shell.set_margin(overlay, layer_shell.Edge.TOP, 16)
             layer_shell.set_margin(overlay, layer_shell.Edge.RIGHT, 16)
-            layer_shell.set_keyboard_mode(overlay, layer_shell.KeyboardMode.NONE)
         overlay.show_all()
         overlay.hide()
         return overlay
 
     def _build_ui(self):
         gtk = self._Gtk
-        root = gtk.Box(orientation=gtk.Orientation.VERTICAL, spacing=10)
-        root.set_border_width(14)
+        root = gtk.Box(orientation=gtk.Orientation.VERTICAL, spacing=12)
+        root.set_border_width(18)
         self.window.add(root)
 
+        style = gtk.CssProvider()
+        style.load_from_data(b"""
+            window { background: #f4f1e9; color: #202b29; }
+            .hero { background: #173b35; color: #f4f1e9; border-radius: 12px; padding: 14px; }
+            .hero label { color: #f4f1e9; }
+            .hero.recording { background: #7a3026; }
+            .eyebrow { color: #c2d4c8; font-size: 10pt; font-weight: bold; }
+            .headline { font-size: 16pt; font-weight: bold; }
+            .timer { font-size: 22pt; font-weight: bold; font-family: monospace; }
+            .section-title { color: #173b35; font-size: 13pt; font-weight: bold; }
+            button { padding: 7px 10px; }
+            treeview { background: #fffdf8; }
+            notebook > header { background: #e8e3d8; }
+        """)
+        gtk.StyleContext.add_provider_for_screen(
+            self._Gdk.Screen.get_default(), style, gtk.STYLE_PROVIDER_PRIORITY_APPLICATION
+        )
+
+        hero = gtk.Box(orientation=gtk.Orientation.VERTICAL, spacing=9)
+        hero.get_style_context().add_class("hero")
+        self.recording_bar = hero
+        top = gtk.Box(spacing=10)
         self.state_label = gtk.Label(label="Checking daemon…", xalign=0)
-        root.pack_start(self.state_label, False, False, 0)
-        self.timer_label = gtk.Label(label="00:00", xalign=0)
-        root.pack_start(self.timer_label, False, False, 0)
+        self.state_label.get_style_context().add_class("headline")
+        top.pack_start(self.state_label, True, True, 0)
+        self.timer_label = gtk.Label(label="00:00", xalign=1)
+        self.timer_label.get_style_context().add_class("timer")
+        top.pack_end(self.timer_label, False, False, 0)
+        hero.pack_start(top, False, False, 0)
         self.level = gtk.LevelBar()
         self.level.set_min_value(0.0)
         self.level.set_max_value(1.0)
         self.level.set_value(0.0)
-        self.level.set_tooltip_text("Microphone input level")
-        root.pack_start(self.level, False, False, 0)
+        self.level.set_tooltip_text("Live microphone input level")
+        self.level.get_accessible().set_name("Microphone input level")
+        hero.pack_start(self.level, False, False, 0)
+        self.level.get_accessible().set_description("Live microphone input level from zero to one")
 
         actions = gtk.Box(spacing=6)
         self.record_button = gtk.Button(label="Start recording")
+        self.record_button.get_accessible().set_name("Start or stop recording")
         self.record_button.connect("clicked", self._toggle)
         actions.pack_start(self.record_button, True, True, 0)
+        self.record_button.set_tooltip_text("Start recording, or stop the active recording")
         stop = gtk.Button(label="Stop")
         stop.connect("clicked", lambda *_: self._command("stop_recording"))
         actions.pack_start(stop, False, False, 0)
+        stop.set_tooltip_text("Stop and transcribe the current recording")
         cancel = gtk.Button(label="Cancel")
         cancel.connect("clicked", lambda *_: self._command("cancel"))
         actions.pack_start(cancel, False, False, 0)
+        cancel.set_tooltip_text("Discard the current recording without transcribing")
         copy = gtk.Button(label="Copy last")
         copy.connect("clicked", lambda *_: self._command("copy_last"))
         actions.pack_start(copy, False, False, 0)
-        root.pack_start(actions, False, False, 0)
+        copy.set_tooltip_text("Copy the latest transcript to the clipboard")
+        hero.pack_start(actions, False, False, 0)
         self.meeting_button = gtk.Button(label="Record meeting (mic + system audio)")
         self.meeting_button.connect("clicked", self._meeting_clicked)
-        root.pack_start(self.meeting_button, False, False, 0)
+        hero.pack_start(self.meeting_button, False, False, 0)
+        root.pack_start(hero, False, False, 0)
 
-        mode_row = gtk.Box(spacing=6)
+        mode_row = gtk.Box(spacing=8)
         mode_row.pack_start(gtk.Label(label="Context", xalign=0), False, False, 0)
         self.mode_combo = gtk.ComboBoxText()
         self._context_modes = sorted(
@@ -208,7 +245,6 @@ class DesktopWindow:
         self.mode_combo.set_tooltip_text("Choose transcription replacements context")
         self.mode_combo.connect("changed", self._mode_changed)
         mode_row.pack_start(self.mode_combo, True, True, 0)
-        root.pack_start(mode_row, False, False, 0)
 
         annotation_row = gtk.Box(spacing=6)
         self.annotation_button = gtk.Button(label="Capture screen region + transcript")
@@ -220,22 +256,31 @@ class DesktopWindow:
         self.annotation_cancel_button = gtk.Button(label="Cancel capture")
         self.annotation_cancel_button.connect("clicked", self._annotation_cancel_clicked)
         annotation_row.pack_start(self.annotation_cancel_button, False, False, 0)
-        root.pack_start(annotation_row, False, False, 0)
         self.annotation_stop_button.set_sensitive(False)
         self.annotation_cancel_button.set_sensitive(False)
 
         self.notebook = gtk.Notebook()
+        self.notebook.set_scrollable(True)
         root.pack_start(self.notebook, True, True, 0)
-        history_page = gtk.Box(orientation=gtk.Orientation.VERTICAL, spacing=6)
+        history_page = gtk.Box(orientation=gtk.Orientation.VERTICAL, spacing=8)
+        history_page.set_border_width(10)
+        history_heading = gtk.Label(label="Your recordings", xalign=0)
+        history_heading.get_style_context().add_class("section-title")
+        history_page.pack_start(history_heading, False, False, 0)
         self.history_store = gtk.ListStore(str, str, str)
         self.history_view = gtk.TreeView(model=self.history_store)
+        self.history_view.set_headers_visible(True)
+        self.history_view.get_accessible().set_name("Recording history")
         for title, index in (("Time", 0), ("Transcript", 1)):
             renderer = gtk.CellRendererText()
+            renderer.set_property("ellipsize", 3)
             column = gtk.TreeViewColumn(title, renderer, text=index)
             column.set_resizable(True)
+            column.set_expand(index == 1)
             self.history_view.append_column(column)
         self.history_view.connect("row-activated", self._edit_replacements)
         scroll = gtk.ScrolledWindow()
+        scroll.set_policy(gtk.PolicyType.AUTOMATIC, gtk.PolicyType.AUTOMATIC)
         scroll.add(self.history_view)
         history_page.pack_start(scroll, True, True, 0)
         history_actions = gtk.Box(spacing=6)
@@ -249,12 +294,15 @@ class DesktopWindow:
         transcript_view = gtk.TextView(buffer=self.transcript_buffer)
         transcript_view.set_wrap_mode(gtk.WrapMode.WORD_CHAR)
         transcript_view.set_editable(False)
+        transcript_view.set_left_margin(12)
+        transcript_view.set_right_margin(12)
+        transcript_view.set_top_margin(12)
         transcript_scroll = gtk.ScrolledWindow()
         transcript_scroll.add(transcript_view)
         self.notebook.append_page(transcript_scroll, gtk.Label(label="Transcript"))
 
-        settings = gtk.Box(orientation=gtk.Orientation.VERTICAL, spacing=6)
-        settings.set_border_width(8)
+        settings = gtk.Box(orientation=gtk.Orientation.VERTICAL, spacing=8)
+        settings.set_border_width(12)
         self.settings_label = gtk.Label(label=f"Configuration: {get_config_path()}", xalign=0)
         self.settings_label.set_line_wrap(True)
         settings.pack_start(self.settings_label, False, False, 0)
@@ -284,8 +332,11 @@ class DesktopWindow:
         diagnostics.connect("clicked", lambda *_: self._poll())
         settings.pack_start(diagnostics, False, False, 0)
         self.notebook.append_page(settings, gtk.Label(label="Settings"))
+        root.pack_start(mode_row, False, False, 0)
+        root.pack_start(annotation_row, False, False, 0)
         self.error_label = gtk.Label(label="", xalign=0)
         self.error_label.set_line_wrap(True)
+        self.error_label.set_selectable(True)
         root.pack_start(self.error_label, False, False, 0)
         self._refresh_config_summary()
 
@@ -495,6 +546,7 @@ class DesktopWindow:
             self.error_label.set_text(str(exc))
             self.overlay_state.set_text("Daemon unavailable")
             self.overlay_error.set_text(str(exc))
+            self.recording_bar.get_style_context().remove_class("recording")
             self.overlay.show_all()
         except Exception:
             logger.exception("Desktop status refresh failed")
@@ -502,6 +554,11 @@ class DesktopWindow:
 
     def _render_status(self, status):
         state = status.get("state", "unknown")
+        context = self.recording_bar.get_style_context()
+        if state == "recording":
+            context.add_class("recording")
+        else:
+            context.remove_class("recording")
         self.state_label.set_text(
             f"{state.title()}  |  {status.get('model', 'model unavailable')}  |  "
             f"{status.get('device', 'device unavailable')}"
@@ -532,9 +589,30 @@ class DesktopWindow:
             timer = "00:00"
             self.timer_label.set_text(timer)
         self.overlay_timer.set_text(timer)
-        self.overlay_state.set_text("Transcribing" if state == "transcribing" else state.title())
-        self.overlay_error.set_text(str(status.get("error") or ""))
-        if status.get("error") or state in ("recording", "transcribing"):
+        assistant_state = str(status.get("assistant_state") or "idle").lower()
+        assistant_error = str(status.get("assistant_error") or "")
+        assistant_active = assistant_state in {"recording", "thinking", "speaking"}
+        assistant_failed = assistant_state == "error" or bool(assistant_error)
+        if assistant_active:
+            assistant_label = {
+                "recording": "Assistant listening",
+                "thinking": "Assistant thinking",
+                "speaking": "Assistant speaking",
+            }[assistant_state]
+            self.overlay_state.set_text(assistant_label)
+        elif assistant_failed:
+            self.overlay_state.set_text("Assistant error")
+        else:
+            self.overlay_state.set_text(
+                "Transcribing" if state == "transcribing" else state.title()
+            )
+        self.overlay_error.set_text(assistant_error or str(status.get("error") or ""))
+        if (
+            status.get("error")
+            or assistant_failed
+            or state in ("recording", "transcribing")
+            or assistant_active
+        ):
             self.overlay.show_all()
         else:
             self.overlay.hide()
@@ -796,10 +874,11 @@ class DesktopWindow:
         self._Gtk.main_quit()
 
     def run(self):
-        self.window.show_all()
+        if not self.start_hidden:
+            self.window.show_all()
         self._Gtk.main()
 
 
-def main(*, client: bool = False):
+def main(*, start_hidden: bool = False):
     """Launch the GTK desktop companion."""
-    DesktopWindow(client=client).run()
+    DesktopWindow(start_hidden=start_hidden).run()

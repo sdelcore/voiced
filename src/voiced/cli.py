@@ -44,7 +44,7 @@ def main(ctx: click.Context, verbose: bool) -> None:
 
     \b
     STT Commands:
-      voiced start          Start the daemon for hotkey recording
+      voiced start          Launch the gateway client and tray
       voiced toggle         Toggle recording on/off
       voiced transcribe     Transcribe an audio file
 
@@ -60,65 +60,32 @@ def main(ctx: click.Context, verbose: bool) -> None:
 
 @main.command()
 @click.option("--daemon", "-d", is_flag=True, help="Run in background (daemonize)")
-@click.option("--http", is_flag=True, help="Enable embedded HTTP server for remote transcription")
-@click.option("--http-host", default=None, help="HTTP server host (default: from config)")
-@click.option("--http-port", default=None, type=int, help="HTTP server port (default: from config)")
 @click.pass_context
-def start(
-    ctx: click.Context,
-    daemon: bool,
-    http: bool,
-    http_host: str | None,
-    http_port: int | None,
-) -> None:
-    """Start the voiced daemon.
+def start(ctx: click.Context, daemon: bool) -> None:
+    """Start the desktop gateway client and tray."""
+    from voiced.config import get_server_url
+    from voiced.daemon import daemonize
+    from voiced.remote_daemon import RemoteDaemon, is_gateway_running
 
-    The daemon provides hotkey-triggered recording with tray icon.
-    Use --http to also enable the HTTP transcription API.
-
-    Examples:
-
-        voiced start                      # Desktop mode only
-
-        voiced start --http               # Desktop + HTTP API
-
-        voiced start --http --http-host 0.0.0.0  # Accept remote connections
-
-        voiced start -d                   # Run in background
-    """
-    from voiced.daemon import Daemon, daemonize, is_daemon_running
-
-    if is_daemon_running():
-        click.echo("Daemon is already running", err=True)
+    if is_gateway_running():
+        click.echo("Gateway client is already running", err=True)
         sys.exit(1)
 
     config = load_config()
-
-    # Determine effective HTTP settings
-    http_enabled = http or config.daemon.http_enabled
-
-    from voiced.transcriber import STT_MODEL
-
-    click.echo(f"Starting voiced daemon (model: {STT_MODEL})")
-    if http_enabled:
-        effective_host = http_host or config.daemon.http_host or config.server.host
-        effective_port = http_port or config.daemon.http_port or config.server.port
-        click.echo(f"HTTP server: {effective_host}:{effective_port}")
+    effective_url = get_server_url()
+    if config.client.audio_base_url:
+        click.echo("Starting gateway client (configured audio endpoint)")
+    else:
+        click.echo(f"Starting gateway client (server: {effective_url})")
 
     if daemon:
         click.echo("Daemonizing...")
         daemonize()
 
     try:
-        d = Daemon(
-            config,
-            http_enabled=http if http else None,  # Only override if explicitly set
-            http_host=http_host,
-            http_port=http_port,
-        )
-        d.run()
+        RemoteDaemon(server_url=effective_url, config=config).run()
     except KeyboardInterrupt:
-        click.echo("\nDaemon interrupted")
+        click.echo("\nGateway client interrupted")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -187,62 +154,6 @@ def server(
 
     try:
         srv.start()
-    except Exception as e:
-        click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
-
-
-@main.command("client")
-@click.option(
-    "--server", "server_url", default=None, help="Server URL (e.g., http://192.168.1.100:8765)"
-)
-@click.option("--daemon", "-d", is_flag=True, help="Run in background")
-@click.option("--timeout", type=float, default=None, help="Request timeout in seconds")
-@click.pass_context
-def client_cmd(
-    ctx: click.Context, server_url: str | None, daemon: bool, timeout: float | None
-) -> None:
-    """Start the remote client daemon.
-
-    Records audio locally and sends to a remote server for transcription.
-    The server URL can be set via CLI, environment variable (VOICED_SERVER_URL),
-    or config file.
-
-    Examples:
-
-        voiced client --server http://192.168.1.100:8765
-
-        voiced client -d                  # Run in background
-
-        VOICED_SERVER_URL=http://server:8765 voiced client
-    """
-    from voiced.config import get_server_url
-    from voiced.daemon import daemonize
-    from voiced.remote_daemon import RemoteDaemon, is_client_running
-
-    if is_client_running():
-        click.echo("Client is already running", err=True)
-        sys.exit(1)
-
-    config = load_config()
-    effective_url = get_server_url(server_url)
-
-    click.echo("Starting remote client")
-    click.echo(f"Server: {effective_url}")
-
-    if daemon:
-        click.echo("Daemonizing...")
-        daemonize()
-
-    try:
-        client = RemoteDaemon(
-            server_url=effective_url,
-            config=config,
-            timeout=timeout,
-        )
-        client.run()
-    except KeyboardInterrupt:
-        click.echo("\nClient interrupted")
     except Exception as e:
         click.echo(f"Error: {e}", err=True)
         sys.exit(1)
@@ -350,54 +261,37 @@ def webrtc_client_cmd(ctx: click.Context, server_url: str | None, timeout: float
 
 
 @main.command()
-@click.option("--client", "remote_client", is_flag=True, help="Stop the local remote client")
-def stop(remote_client: bool) -> None:
-    """Stop the local daemon, or the remote client with ``--client``."""
-    from voiced import client
+def stop() -> None:
+    """Stop the gateway client."""
+    from voiced.client import stop_daemon
 
     try:
-        if remote_client:
-            from voiced.config import get_client_socket_path
-
-            response = client.send_command("stop", socket_path=get_client_socket_path())
-        else:
-            response = client.stop_daemon()
+        response = stop_daemon()
         if response.get("status") == "ok":
-            target = "Remote client" if remote_client else "Daemon"
-            click.echo(f"{target} stopping")
+            click.echo("Gateway client stopping")
         else:
             click.echo(f"Error: {response.get('message', 'Unknown error')}", err=True)
-            sys.exit(1)
+            raise click.exceptions.Exit(1)
     except DaemonNotRunning:
-        target = "remote client" if remote_client else "daemon"
-        command = "voiced client" if remote_client else "voiced start"
-        click.echo(f"{target.capitalize()} is not running. Start it with: {command}", err=True)
-        sys.exit(1)
+        click.echo("Gateway client is not running. Start it with: voiced start", err=True)
+        raise click.exceptions.Exit(1)
     except ClientError as e:
         click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+        raise click.exceptions.Exit(1)
 
 
-def _send_recording_command(command: str, label: str, remote_client: bool = False) -> None:
-    """Send a recording control command over the selected Unix socket."""
+def _send_recording_command(command: str, label: str) -> None:
     from voiced.client import send_command
 
     try:
-        socket_path = None
-        if remote_client:
-            from voiced.config import get_client_socket_path
-
-            socket_path = get_client_socket_path()
-        response = send_command(command, socket_path=socket_path)
+        response = send_command(command)
         if response.get("status") == "ok":
             click.echo(response.get("message", label))
         else:
             click.echo(f"Error: {response.get('message', 'Unknown error')}", err=True)
             raise click.exceptions.Exit(1)
     except DaemonNotRunning:
-        target = "remote client" if remote_client else "daemon"
-        command = "voiced client" if remote_client else "voiced start"
-        click.echo(f"{target.capitalize()} is not running. Start it with: {command}", err=True)
+        click.echo("Gateway client is not running. Start it with: voiced start", err=True)
         raise click.exceptions.Exit(1)
     except ClientError as e:
         click.echo(f"Error: {e}", err=True)
@@ -405,128 +299,99 @@ def _send_recording_command(command: str, label: str, remote_client: bool = Fals
 
 
 @main.command("start-recording")
-@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
-def start_recording(remote_client: bool) -> None:
+def start_recording() -> None:
     """Start recording (use on a push-to-talk key press)."""
-    _send_recording_command("start", "Recording started", remote_client)
+    _send_recording_command("start", "Recording started")
 
 
 @main.command("stop-recording")
-@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
-def stop_recording(remote_client: bool) -> None:
+def stop_recording() -> None:
     """Stop recording and transcribe (use on push-to-talk key release)."""
-    _send_recording_command("stop_recording", "Recording stopped", remote_client)
+    _send_recording_command("stop_recording", "Recording stopped")
 
 
 @main.command("assistant-start")
-@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
-def assistant_start(remote_client: bool) -> None:
+def assistant_start() -> None:
     """Start an assistant turn (use on a push-to-talk key press)."""
-    _send_recording_command("assistant_start", "Assistant recording started", remote_client)
+    _send_recording_command("assistant_start", "Assistant recording started")
 
 
 @main.command("assistant-stop")
-@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
-def assistant_stop(remote_client: bool) -> None:
+def assistant_stop() -> None:
     """Stop assistant recording and submit the prompt (use on key release)."""
-    _send_recording_command("assistant_stop", "Assistant recording stopped", remote_client)
+    _send_recording_command("assistant_stop", "Assistant recording stopped")
 
 
 @main.command()
-@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
-def cancel(remote_client: bool) -> None:
+def cancel() -> None:
     """Cancel the current recording without transcribing it."""
-    _send_recording_command("cancel", "Recording cancelled", remote_client)
+    _send_recording_command("cancel", "Recording cancelled")
 
 
 @main.command("copy-last")
-@click.option("--client", "remote_client", is_flag=True, help="Use the remote client")
-def copy_last(remote_client: bool) -> None:
+def copy_last() -> None:
     """Copy the most recent transcription to the clipboard."""
-    _send_recording_command("copy_last", "Copied last transcription", remote_client)
+    _send_recording_command("copy_last", "Copied last transcription")
 
 
 @main.command()
-@click.option("--client", "remote_client", is_flag=True, help="Connect desktop to remote client")
-def desktop(remote_client: bool) -> None:
+@click.option("--hidden", is_flag=True, help="Start the desktop window hidden")
+def desktop(hidden: bool) -> None:
     """Open the desktop recording window."""
     from voiced.desktop import DesktopWindow
 
-    DesktopWindow(client=remote_client).run()
+    DesktopWindow(start_hidden=hidden).run()
 
 
 @main.command()
-@click.option(
-    "--client",
-    "remote_client",
-    is_flag=True,
-    help="Toggle the local remote client instead of the local daemon",
-)
-def toggle(remote_client: bool) -> None:
-    """Toggle recording on the local daemon or remote client.
-
-    Bind the default command when using the local daemon:
-
-        bind = SUPER, R, exec, voiced toggle
-
-    Bind the remote client when using ``voiced client``:
-
-        bind = SUPER, R, exec, voiced toggle --client
-    """
-    from voiced import client
+def toggle() -> None:
+    """Toggle recording on the gateway client."""
+    from voiced.client import toggle_recording
 
     try:
-        if remote_client:
-            from voiced.config import get_client_socket_path
-
-            response = client.send_command("toggle", socket_path=get_client_socket_path())
-        else:
-            response = client.toggle_recording()
+        response = toggle_recording()
         if response.get("status") == "ok":
-            state = response.get("state", "unknown")
-            click.echo(f"State: {state}")
+            click.echo(f"State: {response.get('state', 'unknown')}")
         elif response.get("status") == "busy":
-            click.echo(f"Daemon busy: {response.get('message', '')}", err=True)
+            click.echo(f"Gateway busy: {response.get('message', '')}", err=True)
         else:
             click.echo(f"Error: {response.get('message', 'Unknown error')}", err=True)
-            sys.exit(1)
+            raise click.exceptions.Exit(1)
     except DaemonNotRunning:
-        target = "remote client" if remote_client else "daemon"
-        command = "voiced client" if remote_client else "voiced start"
-        click.echo(f"{target.capitalize()} is not running. Start it with: {command}", err=True)
-        sys.exit(1)
+        click.echo("Gateway client is not running. Start it with: voiced start", err=True)
+        raise click.exceptions.Exit(1)
     except ClientError as e:
         click.echo(f"Error: {e}", err=True)
-        sys.exit(1)
+        raise click.exceptions.Exit(1)
 
 
 @main.command()
-@click.option("--client", "remote_client", is_flag=True, help="Show local remote-client status")
-def status(remote_client: bool) -> None:
-    """Show daemon status, or remote-client status with ``--client``."""
-    from voiced import client
+def status() -> None:
+    """Show gateway client status."""
+    from voiced.client import get_status
 
     try:
-        if remote_client:
-            from voiced.config import get_client_socket_path
-
-            response = client.send_command("status", socket_path=get_client_socket_path())
-            click.echo("Status: remote client running")
-            click.echo(f"State: {response.get('state', 'unknown')}")
-            click.echo(f"Server: {response.get('server', 'unknown')}")
-        else:
-            response = client.get_status()
-            click.echo("Status: running")
-            click.echo(f"State: {response.get('state', 'unknown')}")
-            click.echo(f"Model: {response.get('model', 'unknown')}")
-            click.echo(f"Device: {response.get('device', 'unknown')}")
+        response = get_status()
+        if response.get("status") != "ok":
+            message = response.get("message", "Unknown status error")
+            click.echo(f"Status: error ({message})", err=True)
+            raise click.exceptions.Exit(1)
+        click.echo("Status: running")
+        click.echo(f"State: {response.get('state', 'unknown')}")
+        click.echo(f"Model: {response.get('model') or 'unknown'}")
+        click.echo(f"Device: {response.get('device', 'unknown')}")
+        if response.get("assistant_state") not in (None, "idle"):
+            click.echo(f"Assistant: {response['assistant_state']}")
+        if response.get("assistant_error"):
+            click.echo(f"Assistant error: {response['assistant_error']}", err=True)
+        if response.get("error"):
+            click.echo(f"Error: {response['error']}", err=True)
     except DaemonNotRunning:
-        target = "remote client" if remote_client else "daemon"
-        click.echo(f"Status: {target} not running", err=True)
-        sys.exit(1)
+        click.echo("Status: gateway client not running", err=True)
+        raise click.exceptions.Exit(1)
     except ClientError as e:
         click.echo(f"Status: error ({e})", err=True)
-        sys.exit(1)
+        raise click.exceptions.Exit(1)
 
 
 @main.command()

@@ -1,13 +1,9 @@
-"""Remote client daemon for voiced.
-
-Records audio locally and sends to a remote server for transcription.
-"""
+"""Desktop gateway daemon using local audio with remote inference."""
 
 import json
 import logging
 import os
 import signal
-import sys
 import threading
 from collections import deque
 from datetime import datetime
@@ -17,7 +13,7 @@ from urllib.request import Request, urlopen
 
 from voiced import audio
 from voiced.assistant import Assistant
-from voiced.config import Config, get_cache_dir, get_client_socket_path, load_config
+from voiced.config import Config, get_pid_path, get_socket_path, load_config
 from voiced.injector import inject_to_clipboard
 from voiced.openai_audio import OpenAIAudio
 from voiced.recorder import Recorder
@@ -37,7 +33,7 @@ class ClientState(Enum):
 
 
 class RemoteDaemon:
-    """Client daemon that records locally and transcribes remotely."""
+    """Desktop gateway client that records locally and transcribes remotely."""
 
     def __init__(
         self,
@@ -66,7 +62,6 @@ class RemoteDaemon:
 
         self._state = ClientState.IDLE
         self._running = False
-        self._state_lock = threading.Lock()
         self._shutdown_event = threading.Event()
         self._lock = threading.RLock()
         self._tray: TrayIcon | None = None
@@ -78,8 +73,7 @@ class RemoteDaemon:
         self._partial_text = ""
         self._context_mode = "default"
         self._recording_mode = "default"
-        self._input_level = 0.0
-        self._pid_path = get_cache_dir() / "client.pid"
+        self._pid_path = get_pid_path()
         self._worker: threading.Thread | None = None
         self._stream_client: SyncWebRTCClient | None = None
         self._assistant: Assistant | None = None
@@ -186,6 +180,7 @@ class RemoteDaemon:
                 self._assistant = Assistant(self.config.assistant, self._audio_provider)
             self._assistant.interrupt()
             self._assistant_error = None
+            self._last_error = None
             try:
                 recorder = Recorder(config=self.config.audio)
                 recorder.start()
@@ -193,9 +188,11 @@ class RemoteDaemon:
             except Exception as exc:
                 self._assistant_error = str(exc)
                 logger.exception("Failed to start assistant recording")
+                self._update_tray_state()
                 return {"status": "error", "message": str(exc)}
         if self.config.audio.beep_enabled:
             threading.Thread(target=audio.beep_start, daemon=True).start()
+        self._update_tray_state()
         return {"status": "ok", "message": "Assistant recording started"}
 
     def _handle_assistant_stop(self, _args: dict | None = None) -> dict:
@@ -208,6 +205,7 @@ class RemoteDaemon:
                 audio_data = recorder.stop()
             except Exception as exc:
                 self._assistant_error = str(exc)
+                self._update_tray_state()
                 logger.exception("Failed to stop assistant recording")
                 return {"status": "error", "message": str(exc)}
         if self.config.audio.beep_enabled:
@@ -216,11 +214,12 @@ class RemoteDaemon:
             except Exception as exc:
                 with self._assistant_lock:
                     self._assistant_error = str(exc)
+                self._update_tray_state()
                 return {"status": "error", "message": str(exc)}
         if len(audio_data) == 0:
             with self._assistant_lock:
-                if generation == self._assistant_generation:
-                    self._assistant_error = "no audio recorded"
+                self._assistant_error = "no audio recorded"
+            self._update_tray_state()
             return {"status": "error", "message": "no audio recorded"}
         threading.Thread(
             target=self._transcribe_assistant,
@@ -228,6 +227,7 @@ class RemoteDaemon:
             daemon=True,
             name="RemoteAssistantTranscription",
         ).start()
+        self._update_tray_state()
         return {"status": "ok", "message": "Assistant recording stopped"}
 
     def _transcribe_assistant(self, audio_data, sample_rate: int, generation: int) -> None:
@@ -245,7 +245,7 @@ class RemoteDaemon:
             with self._assistant_lock:
                 if generation == self._assistant_generation:
                     self._assistant_error = str(exc)
-                    self._last_error = str(exc)
+            self._update_tray_state()
 
     def _handle_dictation_start(self, _args: dict | None = None) -> dict:
         with self._assistant_lock, self._lock:
@@ -263,11 +263,14 @@ class RemoteDaemon:
                 self._state = ClientState.RECORDING
                 self._partial_text = ""
                 self._last_error = None
+                self._assistant_error = None
             except Exception as exc:
                 self._last_error = str(exc)
+                self._update_tray_state()
                 return self._result("error", str(exc))
         if self.config.audio.beep_enabled:
             threading.Thread(target=audio.beep_start, daemon=True).start()
+        self._update_tray_state()
         return self._result()
 
     def _handle_dictation_stop(self, _args: dict | None = None) -> dict:
@@ -278,11 +281,14 @@ class RemoteDaemon:
             generation = self._audio_generation
             self._state = ClientState.SENDING
             self._partial_text = ""
+            self._last_error = None
+            self._update_tray_state()
             try:
                 audio_data = recorder.stop()
             except Exception as exc:
                 self._last_error = str(exc)
                 self._state = ClientState.IDLE
+                self._update_tray_state()
                 return self._result("error", str(exc))
         if self.config.audio.beep_enabled:
             try:
@@ -292,6 +298,7 @@ class RemoteDaemon:
                     if generation == self._audio_generation:
                         self._last_error = str(exc)
                         self._state = ClientState.IDLE
+                self._update_tray_state()
                 return self._result("error", str(exc))
         if len(audio_data) == 0:
             with self._lock:
@@ -376,7 +383,10 @@ class RemoteDaemon:
                 self._state = ClientState.IDLE
                 self._partial_text = ""
         if audio_recorder is not None:
-            audio_recorder.stop()
+            try:
+                audio_recorder.stop()
+            except Exception:
+                logger.debug("Could not stop cancelled recording", exc_info=True)
         if stream_client is not None:
             stream_client.disconnect()
         self._update_tray_state()
@@ -398,11 +408,11 @@ class RemoteDaemon:
         return {"status": "ok" if success else "error", "text": text}
 
     def _handle_status(self, args: dict | None = None) -> dict:
-        with self._lock:
+        with self._lock, self._assistant_lock:
             history = self._serialize_history()
-            input_level = (
-                self._stream_client.input_level if self._stream_client is not None else 0.0
-            )
+            recorder = self._audio_recorder or self._assistant_recorder
+            input_level = recorder.input_level if recorder is not None else 0.0
+            assistant_recording = self._assistant_recorder is not None
             status = {
                 "status": "ok",
                 "state": "transcribing"
@@ -413,18 +423,21 @@ class RemoteDaemon:
                 "history": history,
                 "last_transcript": history[0]["text"] if history else None,
                 "error": self._last_error,
-                "mode": "remote",
-                "model": None,
-                "device": self.config.transcription.device,
+                "mode": "gateway",
+                "model": self.config.client.stt_model or None,
+                "device": self.config.audio.device,
                 "partial_text": self._partial_text,
                 "input_level": input_level,
                 "context_mode": self._context_mode,
+                "assistant_state": (
+                    "recording"
+                    if assistant_recording
+                    else self._assistant.state
+                    if self._assistant is not None
+                    else "idle"
+                ),
+                "assistant_error": self._assistant_error,
             }
-        with self._assistant_lock:
-            status["assistant_state"] = (
-                self._assistant.state if self._assistant is not None else "idle"
-            )
-            status["assistant_error"] = self._assistant_error
         return status
 
     def _handle_set_context_mode(self, args: dict | None = None) -> dict:
@@ -487,6 +500,7 @@ class RemoteDaemon:
     def _start_recording(self) -> dict:
         if self._state != ClientState.IDLE:
             return self._result("rejected", "not idle")
+        self._last_error = None
         client = SyncWebRTCClient(self._webrtc_config)
         try:
             client.connect()
@@ -505,12 +519,16 @@ class RemoteDaemon:
         except Exception as exc:
             client.disconnect()
             self._last_error = str(exc)
+            self._update_tray_state()
             return self._result("error", self._last_error)
         self._stream_client = client
         self._recording_mode = mode
         self._state = ClientState.RECORDING
+        self._last_error = None
+        self._assistant_error = None
         if self.config.audio.beep_enabled:
             threading.Thread(target=audio.beep_start, daemon=True).start()
+        self._update_tray_state()
         return self._result()
 
     def _stop_and_send(self) -> dict:
@@ -525,17 +543,19 @@ class RemoteDaemon:
             client, self._stream_client = self._stream_client, None
             if client is not None:
                 client.disconnect()
+            self._update_tray_state()
             return self._result("error", self._last_error)
-        self._state = ClientState.SENDING
         generation = self._cancel_generation
+        self._state = ClientState.SENDING
         self._partial_text = ""
-        self._worker = threading.Thread(
+        worker = threading.Thread(
             target=self._send_and_inject,
             args=(generation,),
             daemon=True,
             name="RemoteTranscriptionWorker",
         )
-        self._worker.start()
+        self._worker = worker
+        worker.start()
         self._update_tray_state()
         return self._result()
 
@@ -584,8 +604,12 @@ class RemoteDaemon:
             self._update_tray_state()
 
     def _update_tray_state(self) -> None:
-        """Update tray icon to match client state."""
+        """Update tray icon to reflect recording, processing, and errors."""
         if self._tray is None:
+            return
+
+        if self._last_error or self._assistant_error:
+            self._tray.set_state(TrayState.ERROR)
             return
 
         state_map = {
@@ -594,19 +618,6 @@ class RemoteDaemon:
             ClientState.SENDING: TrayState.TRANSCRIBING,
         }
         self._tray.set_state(state_map.get(self._state, TrayState.IDLE))
-
-    def _handle_client_status(self, _args: dict) -> dict:
-        """Report the local remote-client state and inference endpoint."""
-        return {**self._handle_status(), "server": self.server_url}
-
-    def _handle_client_stop(self, _args: dict) -> dict:
-        """Request shutdown of the local remote client daemon."""
-        self._shutdown_event.set()
-        return {"status": "ok"}
-
-    def _handle_client_toggle(self, _args: dict) -> dict:
-        """Handle a toggle command from the local CLI socket."""
-        return self._handle_toggle()
 
     def _on_tray_toggle(self) -> None:
         """Handle tray icon toggle click."""
@@ -645,31 +656,26 @@ class RemoteDaemon:
             return False
 
     def run(self) -> None:
-        """Run the remote client daemon."""
-        logger.info(f"Starting remote client (server: {self.server_url})")
+        """Run the gateway client daemon."""
+        logger.info(f"Starting gateway client (server: {self.server_url})")
 
         if self._audio_provider is None and not self._check_server():
-            logger.error("Cannot connect to server. Is it running?")
-            sys.exit(1)
+            self._last_error = "Cannot connect to server. Is it running?"
+            logger.error(self._last_error)
+            raise RuntimeError(self._last_error)
 
         self._setup_signals()
         self._write_pid()
 
         try:
-            self._control_server = Server(get_client_socket_path())
+            self._control_server = Server(get_socket_path())
             self._control_server.register_handler("toggle", self._handle_toggle)
-            if self._audio_provider is not None:
-                self._control_server.register_handler("start", self._handle_dictation_start)
-                self._control_server.register_handler("stop_recording", self._handle_dictation_stop)
-                self._control_server.register_handler(
-                    "assistant_start", self._handle_assistant_start
-                )
-                self._control_server.register_handler("assistant_stop", self._handle_assistant_stop)
-            else:
-                self._control_server.register_handler("start", self._handle_start_recording)
-                self._control_server.register_handler("stop_recording", self._handle_stop_recording)
+            self._control_server.register_handler("start", self._handle_start_recording)
+            self._control_server.register_handler("stop_recording", self._handle_stop_recording)
+            self._control_server.register_handler("assistant_start", self._handle_assistant_start)
+            self._control_server.register_handler("assistant_stop", self._handle_assistant_stop)
             self._control_server.register_handler("cancel", self._handle_cancel)
-            self._control_server.register_handler("status", self._handle_client_status)
+            self._control_server.register_handler("status", self._handle_status)
             self._control_server.register_handler("history", self._handle_history)
             self._control_server.register_handler("copy_last", self._handle_copy_last)
             self._control_server.register_handler("set_context_mode", self._handle_set_context_mode)
@@ -686,7 +692,7 @@ class RemoteDaemon:
             logger.info("Tray icon started")
 
             self._running = True
-            logger.info("Remote client ready")
+            self._update_tray_state()
 
             while not self._shutdown_event.is_set():
                 self._shutdown_event.wait(timeout=1.0)
@@ -694,7 +700,7 @@ class RemoteDaemon:
             self._cleanup()
 
     def _cleanup(self) -> None:
-        """Stop local control before removing the client's PID file."""
+        """Stop local control before removing the gateway PID file."""
         if self._control_server is not None:
             self._control_server.stop()
             self._control_server = None
@@ -730,33 +736,19 @@ class RemoteDaemon:
             self._tray.stop()
             self._tray = None
         self._remove_pid()
-        logger.info("Remote client stopped")
+        logger.info("Gateway client stopped")
 
 
-def get_client_pid() -> int | None:
-    """Get the PID of a running client daemon.
-
-    Returns:
-        PID if client is running, None otherwise.
-    """
-    pid_path = get_cache_dir() / "client.pid"
+def is_gateway_running() -> bool:
+    """Check whether the gateway daemon PID is alive."""
+    pid_path = get_pid_path()
     if not pid_path.exists():
-        return None
+        return False
 
     try:
         with open(pid_path) as f:
             pid = int(f.read().strip())
-
         os.kill(pid, 0)
-        return pid
+        return True
     except (ValueError, ProcessLookupError, PermissionError):
-        return None
-
-
-def is_client_running() -> bool:
-    """Check if client daemon is running.
-
-    Returns:
-        True if client is running, False otherwise.
-    """
-    return get_client_pid() is not None
+        return False

@@ -140,11 +140,6 @@ def get_socket_path() -> Path:
     return get_cache_dir() / "control.sock"
 
 
-def get_client_socket_path() -> Path:
-    """Get the local control socket path for the remote client daemon."""
-    return get_cache_dir() / "client-control.sock"
-
-
 def get_pid_path() -> Path:
     """Get the path to the PID file."""
     return get_cache_dir() / "daemon.pid"
@@ -312,8 +307,12 @@ host = "127.0.0.1"       # 0.0.0.0 to accept remote connections
 port = 8765
 
 [client]
-server_url = "http://127.0.0.1:8765"
+server_url = "http://127.0.0.1:8765"  # WebRTC server URL
 timeout = 60.0           # Request timeout in seconds
+audio_base_url = ""     # OpenAI-compatible audio endpoint; empty uses WebRTC
+stt_model = ""
+tts_model = ""
+api_key_env = "OPENAI_API_KEY"
 
 [assistant]
 base_url = ""            # OpenAI-compatible chat completions URL; empty disables assistant

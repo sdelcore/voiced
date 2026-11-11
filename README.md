@@ -83,21 +83,22 @@ uv pip install -e ".[dev]"
 
 ## Usage
 
-### Daemon Mode (STT)
+### Desktop Client (STT)
 
-Start the daemon:
+Start the single desktop client, which records locally and uses the configured
+OpenAI-compatible audio endpoint for transcription and speech:
 ```bash
 voiced start           # Run in foreground
 voiced start --daemon  # Run in background
 ```
 
-Toggle recording (bind this to a hotkey):
+Toggle dictation (bind this to a hotkey):
 ```bash
 voiced toggle
 ```
 
-For push-to-talk bindings, call one command on key press and the other on
-release. These commands use the daemon's Unix socket; start the daemon first.
+For push-to-talk bindings, use one command on key press and the other on
+release. Control commands target the default client socket; start the client first.
 ```bash
 voiced start-recording   # key press: begin capture
 voiced stop-recording    # key release: stop and transcribe
@@ -105,59 +106,28 @@ voiced cancel            # discard the current recording
 voiced copy-last         # copy the most recent transcript
 ```
 
-Open the GTK desktop interface with `voiced desktop`. It is a local desktop
-UI and requires the GTK dependencies/display environment. The daemon may
-transcribe locally, or use a configured remote transcription service; in
-remote mode audio leaves this machine for that server.
-
-Check status:
-```bash
-voiced status
-```
-
-Stop the daemon:
-```bash
-voiced stop
-```
+Open the GTK desktop interface with `voiced desktop`. Check status with
+`voiced status` and stop the client with `voiced stop`.
 
 ### Voice Assistant
 
-The optional assistant is a separate press-to-talk workflow from dictation. It
-sends recognized text to an OpenAI-compatible chat-completions endpoint and
-speaks the response using voiced's local TTS. STT remains local as well; the
-assistant request text and conversation context are sent to the configured
-endpoint. Conversation messages are saved locally as a paper trail and reused
-for context. Protect the local conversation file and review the endpoint's data
-handling policy before sending sensitive prompts.
+The assistant is a separate press-to-talk workflow from dictation. It sends
+recognized text to the configured OpenAI-compatible chat-completions endpoint
+and speaks the response using voiced's local TTS. Configure `[assistant]` in
+`~/.config/voiced/config.toml`; export its `api_key_env` variable in the
+environment of the voiced client before starting it. Keep the endpoint empty
+to leave the assistant disabled.
 
-Configure `~/.config/voiced/config.toml`:
-
-```toml
-[assistant]
-base_url = "https://api.openai.com/v1" # Or another OpenAI-compatible API base URL
-model = "your-chat-model"
-api_key_env = "OPENAI_API_KEY"         # Name of the environment variable holding the key
-timeout = 600.0
-```
-
-Export the API key variable in the environment of the voiced daemon before
-starting it. Keep the default empty `base_url` to leave the assistant disabled.
-The endpoint must support OpenAI-compatible chat completions; compatibility
-varies between providers, and this does not imply support for every OpenAI API
-feature.
-
-Bind separate key-down and key-up actions in Hyprland to submit a prompt:
+Bind separate key-down and key-up actions in Hyprland:
 
 ```ini
 bind = SUPER, A, exec, voiced assistant-start
 bindr = SUPER, A, exec, voiced assistant-stop
 ```
 
-Hold the key while speaking and release it to stop capture and start the
-assistant turn. Stopping playback locally does not guarantee that the remote
-server cancels its request: there is no universal server-side cancellation or
-asynchronous job callback in the standard chat API. Response time depends on
-the provider and prompt; no fixed latency is promised.
+Hold the key while speaking and release it to submit the prompt. Conversation
+messages are saved locally and reused for context. Protect that file and review
+the endpoint's data-handling policy before sending sensitive prompts.
 
 
 ### Text-to-Speech
@@ -180,87 +150,23 @@ voiced voices info af_heart         # Show voice details
 voiced voices remove af_heart       # Remove cached voice
 ```
 
-### Daemon with HTTP API
-
-The daemon can also expose an HTTP API for remote transcription and TTS requests:
-
-```bash
-voiced start --http                      # Enable HTTP API on 127.0.0.1:8765
-voiced start --http --http-host 0.0.0.0  # Accept remote connections
-voiced start --http --http-port 9000     # Custom port
-```
-
-Or enable via config (`~/.config/voiced/config.toml`):
-```toml
-[daemon]
-http_enabled = true
-http_host = "0.0.0.0"
-http_port = 8765
-```
-
 ### Standalone HTTP Server
 
-For headless deployments without a display (e.g., dedicated GPU server):
+Run a headless backend, for example on Nightman, to serve LiteLLM audio routes:
 
 ```bash
-voiced server                     # Local only (127.0.0.1:8765)
-voiced server --host 0.0.0.0      # Accept remote connections
-voiced server --port 9000         # Custom port
-voiced server -d                  # Run in background
+voiced server --host 0.0.0.0 --port 8765
 ```
 
-### Remote Client
+The desktop client can use this server as its configured `client.audio_base_url`
+(for example, `http://nightman.tap:8765/v1`) while sending the configured
+`stt_model` and `tts_model` to LiteLLM. Set `client.api_key_env` to the name of
+an environment variable containing the API key; export it before starting the
+client. These names must be models/routes available through your LiteLLM setup.
 
-Record locally on an underpowered client, send to a remote server for transcription:
-
-```bash
-voiced client --server http://192.168.1.100:8765
-voiced client -d                  # Run in background
-
-# Or set server URL via environment
-VOICED_SERVER_URL=http://server:8765 voiced client
-```
-
-The client records audio locally, sends it to the server for transcription, and copies the result to clipboard. Its control commands use the explicit `--client` target:
-
-```bash
-voiced toggle --client
-voiced status --client
-voiced stop --client
-```
-
-The default commands (`voiced toggle`, `voiced status`, and `voiced stop`) still target the local full daemon. Client commands use a separate local Unix socket; the configured server URL is only for inference. If the selected process is not running, the command reports that target as unavailable rather than falling back to the other process.
-
-#### OpenAI-compatible remote audio
-
-Configure optional remote client audio and assistant chat independently in `~/.config/voiced/config.toml`:
-
-```toml
-[client]
-audio_base_url = "https://api.openai.com/v1"
-stt_model = "your-transcription-model"
-tts_model = "your-speech-model"
-api_key_env = "OPENAI_API_KEY"
-timeout = 600.0
-
-[assistant]
-base_url = "https://api.openai.com/v1"
-model = "your-chat-model"
-api_key_env = "OPENAI_API_KEY"
-timeout = 600.0
-```
-
-`client.audio_base_url` enables the OpenAI-compatible audio mode; leave it empty to retain the voiced server behavior. It sends captured WAV audio as multipart `file` to `/audio/transcriptions` with `stt_model`, and requests WAV speech from `/audio/speech` with `tts_model`. Both use the environment variable named by `api_key_env` as a Bearer token. Export the variable in the environment of the client process before starting it. `[assistant]` separately configures OpenAI-compatible chat completions and uses its named key environment variable in the daemon.
-
-Use explicit `--client` commands for remote-client dictation; ordinary commands still target the local daemon:
-
-```bash
-voiced toggle --client
-voiced status --client
-voiced stop --client
-```
-
-Assistant push-to-talk remains a separate workflow, using the `[assistant]` chat settings and key-down/key-up bindings shown above. Remote audio sends microphone recordings to the provider for transcription and speech text for synthesis. Requests are non-streaming and return results when each request completes. Only send audio or text when the provider's retention and processing practices are acceptable.
+The standalone server remains separate from the desktop client and can also be
+run locally with the defaults (`127.0.0.1:8765`). Use `--host 0.0.0.0` only
+when remote clients need to reach it.
 
 **Test with curl:**
 ```bash
@@ -331,12 +237,9 @@ microphone level and elapsed-time indicators, transcript/history views, a
 context selector, meeting capture, and screen annotation controls. Its config
 page edits the local configuration file; it does not start a separate daemon.
 
-The desktop can use the local daemon (which transcribes locally) or a separate
-remote client daemon (`voiced client --server URL`), which records on this
-machine and sends audio to the configured HTTP transcription server. Use
-`voiced desktop --client` for the remote client, and add `--client` to the
-recording control commands to target it. Audio sent remotely leaves this machine;
-the desktop does not silently switch transcription services.
+The desktop UI connects to the default control socket used by `voiced start`.
+Audio endpoint and model routing are configured under `[client]` in
+`~/.config/voiced/config.toml`; it does not select a separate client daemon.
 
 For Hyprland push-to-talk, bind start and stop separately so the release event
 ends capture and starts transcription:
@@ -480,8 +383,10 @@ host = "127.0.0.1"       # 0.0.0.0 to accept remote connections
 port = 8765
 
 [client]
-server_url = "http://127.0.0.1:8765"
-timeout = 60.0           # Request timeout in seconds
+audio_base_url = "http://127.0.0.1:8765/v1"
+stt_model = "your-transcription-model"
+tts_model = "your-speech-model"
+api_key_env = "LITELLM_API_KEY"
 ```
 
 ### List Audio Devices
@@ -619,17 +524,10 @@ CLI (voiced toggle) → Unix Socket → Daemon
                                      └── Tray Icon (D-Bus SNI)
 ```
 
-**Desktop + HTTP mode** (`voiced start --http`):
+**Desktop client and standalone server**:
 ```
-CLI (voiced toggle) → Unix Socket → Daemon
-                                     ├── Recorder (sounddevice)
-                                     ├── Transcriber (Parakeet-TDT) ←───┐
-                                     ├── Synthesizer (Kokoro) ←─────────┤ shared
-                                     ├── Injector (wl-clipboard)        │
-                                     ├── Tray Icon (D-Bus SNI)          │
-                                     └── HTTP Server ───────────────────┘
-                                           ↑
-                 HTTP /transcribe, /synthesize ─┘ (from other services)
+voiced start → local controls and recording → LiteLLM audio endpoint
+voiced server → OpenAI-compatible audio routes → local STT/TTS backend
 ```
 
 **Headless server mode** (`voiced server`):
@@ -638,14 +536,10 @@ HTTP POST /transcribe → HTTP Server → Transcriber
 HTTP POST /synthesize → HTTP Server → Synthesizer
 ```
 
-**Remote client mode** (`voiced client`):
+**LiteLLM desktop audio path**:
 ```
-Client Machine                       Server Machine (GPU)
-─────────────────                    ────────────────────
-voiced client                        voiced server / voiced start --http
-  ├── Recorder ──── WAV ──── HTTP POST /transcribe ────→ Transcriber
-  ├── Tray Icon                                              │
-  └── Injector ←──── text ←───────────────────────────────────
+voiced start → local recorder → HTTP audio request → LiteLLM
+voiced server on Nightman ← serves OpenAI-compatible audio routes
 ```
 
 **File transcription with diarization:**

@@ -47,7 +47,7 @@ class TrayState(Enum):
 
     IDLE = "idle"
     RECORDING = "recording"
-    TRANSCRIBING = "transcribing"
+    ERROR = "error"
 
 
 def _draw_microphone(draw: ImageDraw.Draw, color: tuple, size: int, stroke: int = 2) -> None:
@@ -186,6 +186,8 @@ def create_icon_pixmap(state: TrayState) -> list:
         color = COLORS["recording"]
     elif state == TrayState.TRANSCRIBING:
         color = COLORS["transcribing"]
+    elif state == TrayState.ERROR:
+        color = COLORS["recording"]
     else:
         color = COLORS["idle"]
 
@@ -195,8 +197,8 @@ def create_icon_pixmap(state: TrayState) -> list:
     # Add state-specific indicators
     if state == TrayState.RECORDING:
         _draw_recording_indicator(draw, ICON_SIZE)
-    elif state == TrayState.TRANSCRIBING:
-        _draw_processing_indicator(draw, ICON_SIZE)
+    elif state == TrayState.ERROR:
+        _draw_recording_indicator(draw, ICON_SIZE)
 
     # Convert RGBA to ARGB (StatusNotifierItem expects ARGB32 in network byte order)
     pixels = list(image.getdata())
@@ -384,7 +386,7 @@ class StatusNotifierItem:
         self.title = f"voiced: {state.value}"
         self.icon_pixmap = create_icon_pixmap(state)
 
-        if state == TrayState.RECORDING:
+        if state in (TrayState.RECORDING, TrayState.ERROR):
             self.status = "NeedsAttention"
         else:
             self.status = "Active"
