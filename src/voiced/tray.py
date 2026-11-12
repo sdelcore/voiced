@@ -47,6 +47,7 @@ class TrayState(Enum):
 
     IDLE = "idle"
     RECORDING = "recording"
+    TRANSCRIBING = "transcribing"
     ERROR = "error"
 
 
